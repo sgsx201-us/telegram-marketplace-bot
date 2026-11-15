@@ -1,9 +1,11 @@
+
 [
   {
-    "id": "ff-panel-basic",
-    "name": "Free Fire Basic Panel",
-    "description": "Basic digital panel access",
-    "price_inr": 99,
+    "id": "sample-product",
+    "name": "Digital Product",
+    "description": "Authorized digital service",
+    "category": "Digital Services",
+    "price_inr": 114,
     "active": true
   }
 ]
