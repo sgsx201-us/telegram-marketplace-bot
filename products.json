@@ -1,11 +1,35 @@
 
 [
   {
-    "id": "sample-product",
-    "name": "Digital Product",
-    "description": "Authorized digital service",
+    "id": "digital-12h",
+    "name": "Digital Subscription - 12 Hours",
+    "description": "12-hour authorized digital service",
+    "category": "Digital Services",
+    "price_inr": 64,
+    "active": false
+  },
+  {
+    "id": "digital-1d",
+    "name": "Digital Subscription - 1 Day",
+    "description": "1-day authorized digital service",
     "category": "Digital Services",
     "price_inr": 114,
-    "active": true
+    "active": false
+  },
+  {
+    "id": "digital-3d",
+    "name": "Digital Subscription - 3 Days",
+    "description": "3-day authorized digital service",
+    "category": "Digital Services",
+    "price_inr": 214,
+    "active": false
+  },
+  {
+    "id": "digital-7d",
+    "name": "Digital Subscription - 7 Days",
+    "description": "7-day authorized digital service",
+    "category": "Digital Services",
+    "price_inr": 414,
+    "active": false
   }
 ]
