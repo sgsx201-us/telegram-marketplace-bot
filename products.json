@@ -1,3 +1,9 @@
 [
- {"id":"sample-basic","name":"Your Product Name","description":"Replace this sample description.","price_inr":99,"active":false}
+  {
+    "id": "ff-panel-basic",
+    "name": "Free Fire Basic Panel",
+    "description": "Basic digital panel access",
+    "price_inr": 99,
+    "active": true
+  }
 ]
