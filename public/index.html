@@ -1,3 +1,509 @@
-<h1>My Telegram Marketplace</h1>
 
-<p>Welcome to my shop!</p>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FREE FIRE PANELS MARKETPLACE</title>
+
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+  <style>
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      padding: 16px;
+      background: #10111a;
+      color: #fff;
+      font-family: Arial, sans-serif;
+    }
+
+    header {
+      text-align: center;
+      padding: 22px 10px;
+      background: linear-gradient(135deg, #ff5b20, #a51bce);
+      border-radius: 18px;
+      margin-bottom: 20px;
+    }
+
+    header h1 { font-size: 23px; margin: 0 0 8px; }
+    header p { margin: 0; font-size: 13px; }
+
+    .tabs {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 18px;
+    }
+
+    button {
+      border: 0;
+      border-radius: 10px;
+      padding: 12px;
+      font-weight: bold;
+      cursor: pointer;
+    }
+
+    .tabs button {
+      flex: 1;
+      background: #292a38;
+      color: white;
+    }
+
+    .tabs button.active {
+      background: #ff642d;
+    }
+
+    .products {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .product, .panel {
+      background: #20212d;
+      border: 1px solid #353646;
+      border-radius: 14px;
+      padding: 13px;
+    }
+
+    .product h3 { font-size: 15px; margin: 5px 0 8px; }
+    .product p { color: #b9bac8; font-size: 12px; min-height: 32px; }
+    .price { color: #65e6a0; font-weight: bold; margin: 10px 0; }
+
+    .add, .checkout, .check-payment {
+      width: 100%;
+      color: white;
+      background: #ff642d;
+    }
+
+    .add:disabled, button:disabled {
+      opacity: .5;
+      cursor: not-allowed;
+    }
+
+    .panel {
+      margin-top: 18px;
+    }
+
+    .panel h2 { font-size: 18px; margin-top: 0; }
+
+    .cart-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 9px 0;
+      border-bottom: 1px solid #383947;
+      font-size: 13px;
+    }
+
+    .total {
+      display: flex;
+      justify-content: space-between;
+      font-weight: bold;
+      margin: 16px 0;
+    }
+
+    .message {
+      color: #ffd27a;
+      font-size: 13px;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
+
+    .payment {
+      text-align: center;
+      display: none;
+    }
+
+    .payment img {
+      width: 210px;
+      max-width: 100%;
+      background: white;
+      padding: 8px;
+      border-radius: 12px;
+    }
+
+    .payment a {
+      display: block;
+      color: #72c9ff;
+      margin: 14px 0;
+      overflow-wrap: anywhere;
+    }
+
+    .empty {
+      color: #aaa;
+      text-align: center;
+      padding: 25px 5px;
+      grid-column: 1 / -1;
+    }
+
+    footer {
+      color: #888;
+      text-align: center;
+      font-size: 11px;
+      padding: 25px 5px;
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <h1>🔥 FREE FIRE PANELS MARKETPLACE</h1>
+    <p>Digital products • UPI services • Secure checkout</p>
+  </header>
+
+  <div class="tabs">
+    <button id="freefireTab" class="active" onclick="showCategory('freefire')">
+      🔥 Free Fire
+    </button>
+    <button id="upiTab" onclick="showCategory('upi')">
+      💳 UPI / Payments
+    </button>
+    <button id="allTab" onclick="showCategory('all')">
+      All
+    </button>
+  </div>
+
+  <main>
+    <div id="products" class="products">
+      <div class="empty">Loading products...</div>
+    </div>
+
+    <section class="panel">
+      <h2>🛒 Your Cart</h2>
+      <div id="cart">
+        <p class="message">Your cart is empty.</p>
+      </div>
+
+      <div class="total">
+        <span>Total</span>
+        <span id="total">₹0.00</span>
+      </div>
+
+      <button class="checkout" id="checkout" onclick="checkout()">
+        Proceed to Payment
+      </button>
+      <p id="shopMessage" class="message"></p>
+    </section>
+
+    <section class="panel payment" id="payment">
+      <h2>💳 Complete Your Payment</h2>
+      <p id="paymentAmount" class="price"></p>
+      <img id="qr" alt="Payment QR code" hidden>
+      <a id="payLink" href="#" target="_blank" rel="noopener" hidden>
+        Open Payment Page
+      </a>
+      <a id="upiLink" href="#" hidden>Pay using UPI app</a>
+      <p class="message">
+        Complete the payment, then check your payment status below.
+      </p>
+      <button class="check-payment" id="checkPayment"
+        onclick="checkPayment()">I Have Paid — Verify Payment</button>
+      <p id="paymentMessage" class="message"></p>
+    </section>
+  </main>
+
+  <footer>
+    FREE FIRE PANELS MARKETPLACE · Payments verified before delivery
+  </footer>
+
+<script>
+  const tg = window.Telegram?.WebApp;
+  if (tg) {
+    tg.ready();
+    tg.expand();
+  }
+
+  let products = [];
+  let cart = [];
+  let category = 'freefire';
+  let currentPayment = null;
+  let checking = false;
+
+  const money = value => '₹' + Number(value).toFixed(2);
+
+  function safeCategory(product) {
+    const value = String(
+      product.category || product.category_id || ''
+    ).toLowerCase();
+
+    if (/upi|payment/.test(value)) return 'upi';
+
+    const text = (product.name + ' ' + product.id).toLowerCase();
+    if (/upi|payment/.test(text)) return 'upi';
+
+    return 'freefire';
+  }
+
+  function showCategory(value) {
+    category = value;
+
+    document.getElementById('freefireTab').classList.toggle(
+      'active', value === 'freefire'
+    );
+    document.getElementById('upiTab').classList.toggle(
+      'active', value === 'upi'
+    );
+    document.getElementById('allTab').classList.toggle(
+      'active', value === 'all'
+    );
+
+    renderProducts();
+  }
+
+  async function loadProducts() {
+    const container = document.getElementById('products');
+
+    try {
+      const response = await fetch('/api/products');
+      if (!response.ok) throw new Error('Could not load products.');
+
+      products = await response.json();
+
+      if (!Array.isArray(products)) {
+        throw new Error('Invalid product list.');
+      }
+
+      renderProducts();
+    } catch (error) {
+      container.innerHTML =
+        '<div class="empty">Could not load products. Please try again later.</div>';
+    }
+  }
+
+  function renderProducts() {
+    const container = document.getElementById('products');
+    container.innerHTML = '';
+
+    const available = products.filter(product =>
+      product.active === true &&
+      (category === 'all' || safeCategory(product) === category)
+    );
+
+    if (!available.length) {
+      container.innerHTML =
+        '<div class="empty">No active products in this category yet.</div>';
+      return;
+    }
+
+    available.forEach(product => {
+      const card = document.createElement('article');
+      card.className = 'product';
+
+      const name = document.createElement('h3');
+      name.textContent = product.name;
+
+      const description = document.createElement('p');
+      description.textContent = product.description || 'Digital product';
+
+      const price = document.createElement('div');
+      price.className = 'price';
+      price.textContent = money(product.price_inr);
+
+      const add = document.createElement('button');
+      add.className = 'add';
+      add.textContent = cart.some(item => item.id === product.id)
+        ? 'Added'
+        : 'Add to Cart';
+      add.disabled = cart.some(item => item.id === product.id);
+      add.onclick = () => addToCart(product.id);
+
+      card.append(name, description, price, add);
+      container.appendChild(card);
+    });
+  }
+
+  function addToCart(id) {
+    const product = products.find(item => item.id === id);
+    if (!product || cart.some(item => item.id === id)) return;
+
+    cart.push(product);
+    renderCart();
+    renderProducts();
+  }
+
+  function removeFromCart(id) {
+    cart = cart.filter(item => item.id !== id);
+    renderCart();
+    renderProducts();
+  }
+
+  function renderCart() {
+    const container = document.getElementById('cart');
+    container.innerHTML = '';
+
+    if (!cart.length) {
+      container.innerHTML = '<p class="message">Your cart is empty.</p>';
+    } else {
+      cart.forEach(item => {
+        const row = document.createElement('div');
+        row.className = 'cart-item';
+
+        const label = document.createElement('span');
+        label.textContent = item.name + ' — ' + money(item.price_inr);
+
+        const remove = document.createElement('button');
+        remove.textContent = 'Remove';
+        remove.style.background = '#414253';
+        remove.style.color = 'white';
+        remove.style.padding = '7px';
+        remove.onclick = () => removeFromCart(item.id);
+
+        row.append(label, remove);
+        container.appendChild(row);
+      });
+    }
+
+    const total = cart.reduce(
+      (sum, item) => sum + Number(item.price_inr), 0
+    );
+
+    document.getElementById('total').textContent = money(total);
+    document.getElementById('checkout').disabled = !cart.length;
+  }
+
+  async function checkout() {
+    const message = document.getElementById('shopMessage');
+    const button = document.getElementById('checkout');
+
+    if (!tg?.initData) {
+      message.textContent =
+        'Please open this shop from your Telegram bot using /start.';
+      return;
+    }
+
+    if (!cart.length) return;
+
+    button.disabled = true;
+    message.textContent = 'Creating your payment...';
+
+    try {
+      const response = await fetch('/api/create-order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          initData: tg.initData,
+          productIds: cart.map(item => item.id)
+        })
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Could not create payment.');
+      }
+
+      currentPayment = {
+        agOrderId: data.agOrderId,
+        payUrl: data.payUrl,
+        upiLink: data.upiLink
+      };
+
+      document.getElementById('paymentAmount').textContent =
+        'Amount: ' + money(data.amount);
+
+      const qr = document.getElementById('qr');
+      if (data.qrPngUrl) {
+        qr.src = data.qrPngUrl;
+        qr.hidden = false;
+      } else {
+        qr.hidden = true;
+      }
+
+      const payLink = document.getElementById('payLink');
+      if (data.payUrl) {
+        payLink.href = data.payUrl;
+        payLink.hidden = false;
+        payLink.onclick = event => {
+          event.preventDefault();
+          if (tg) tg.openLink(data.payUrl);
+          else window.open(data.payUrl, '_blank');
+        };
+      } else {
+        payLink.hidden = true;
+      }
+
+      const upiLink = document.getElementById('upiLink');
+      if (data.upiLink) {
+        upiLink.href = data.upiLink;
+        upiLink.hidden = false;
+      } else {
+        upiLink.hidden = true;
+      }
+
+      document.getElementById('paymentMessage').textContent =
+        'Payment order created. Complete payment and verify below.';
+
+      document.getElementById('payment').style.display = 'block';
+      document.getElementById('payment').scrollIntoView({
+        behavior: 'smooth'
+      });
+
+      message.textContent = '';
+    } catch (error) {
+      message.textContent = error.message;
+    } finally {
+      button.disabled = !cart.length;
+    }
+  }
+
+  async function checkPayment() {
+    if (!currentPayment || checking) return;
+
+    if (!tg?.initData) {
+      document.getElementById('paymentMessage').textContent =
+        'Please open the shop through Telegram.';
+      return;
+    }
+
+    checking = true;
+    const button = document.getElementById('checkPayment');
+    const message = document.getElementById('paymentMessage');
+
+    button.disabled = true;
+    message.textContent = 'Checking payment with gateway...';
+
+    try {
+      const response = await fetch('/api/check-payment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          initData: tg.initData,
+          agOrderId: currentPayment.agOrderId
+        })
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Payment check failed.');
+      }
+
+      if (data.status === 'PAID') {
+        message.textContent =
+          'Payment confirmed! Check your Telegram chat for delivery.';
+        cart = [];
+        renderCart();
+        renderProducts();
+        currentPayment = null;
+      } else if (data.status === 'EXPIRED') {
+        message.textContent =
+          'Payment expired. Please create a new order.';
+      } else {
+        message.textContent =
+          'Payment is still pending. Complete payment and try again.';
+      }
+    } catch (error) {
+      message.textContent = error.message;
+    } finally {
+      checking = false;
+      button.disabled = !currentPayment;
+    }
+  }
+
+  loadProducts();
+  renderCart();
+</script>
+</body>
+</html>
