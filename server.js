@@ -752,3 +752,352 @@ app.post('/api/check-payment', async (req, res) => {
     });
   }
 });
+// AG Gateway webhook
+app.post('/ag-webhook', async (req, res) => {
+  try {
+    if (!AG_WEBHOOK_SECRET || !pool) {
+      return res.sendStatus(503);
+    }
+
+    const rawBody = req.body;
+    const timestamp = req.headers['x-ag-timestamp'];
+    const signature = req.headers['x-ag-signature'];
+
+    if (!timestamp || !signature || !Buffer.isBuffer(rawBody)) {
+      return res.sendStatus(400);
+    }
+
+    const timestampText = String(timestamp);
+
+    const timestampNumber = /^\d+$/.test(timestampText)
+      ? Number(timestampText) * (Number(timestampText) > 1e12 ? 0.001 : 1)
+      : Date.parse(timestampText) / 1000;
+
+    if (
+      !Number.isFinite(timestampNumber) ||
+      Math.abs(Date.now() / 1000 - timestampNumber) > 300
+    ) {
+      return res.sendStatus(400);
+    }
+
+    const expected = 'sha256=' + crypto
+      .createHmac('sha256', AG_WEBHOOK_SECRET)
+      .update(`${timestampText}.${rawBody.toString('utf8')}`)
+      .digest('hex');
+
+    const receivedBuffer = Buffer.from(String(signature));
+    const expectedBuffer = Buffer.from(expected);
+
+    if (
+      receivedBuffer.length !== expectedBuffer.length ||
+      !crypto.timingSafeEqual(receivedBuffer, expectedBuffer)
+    ) {
+      return res.sendStatus(401);
+    }
+
+    const event = JSON.parse(rawBody.toString('utf8'));
+    const agOrderId = event.data?.order_id;
+
+    if (event.event === 'payment.paid' && agOrderId) {
+      const verification = await verifyAGPayment(agOrderId);
+      const data = verification.data || {};
+
+      if (String(data.status || '').toUpperCase() === 'PAID') {
+        const orderResult = await pool.query(
+          'SELECT * FROM orders WHERE ag_order_id=$1',
+          [agOrderId]
+        );
+
+        if (orderResult.rowCount) {
+          const order = orderResult.rows[0];
+          const receivedPaise = Math.round(Number(data.amount) * 100);
+
+          if (receivedPaise === order.amount_paise) {
+            await fulfil(
+              agOrderId,
+              data.transaction_id || agOrderId,
+              data.utr || ''
+            );
+          } else {
+            await admin(
+              `PAYMENT AMOUNT MISMATCH\nOrder: ${order.id}\nAG order: ${agOrderId}`
+            );
+          }
+        }
+      }
+    }
+
+    res.sendStatus(200);
+
+  } catch (error) {
+    console.error('AG webhook error:', error);
+    res.sendStatus(500);
+  }
+});
+
+// Telegram bot webhook: normal chat buttons, no Mini App.
+app.post('/telegram-webhook', async (req, res) => {
+  res.sendStatus(200);
+
+  try {
+    const message = req.body.message;
+    const callback = req.body.callback_query;
+
+    if (callback) {
+      const chatId = callback.message?.chat?.id;
+      const userId = callback.from?.id;
+      const action = callback.data || '';
+
+      await tg('answerCallbackQuery', {
+        callback_query_id: callback.id
+      });
+
+      if (action.startsWith('buy:')) {
+        try {
+          await createChatOrder(
+            chatId,
+            userId,
+            action.slice(4)
+          );
+        } catch (error) {
+          await tg('sendMessage', {
+            chat_id: chatId,
+            text: `❌ ${error.message}`
+          });
+        }
+
+      } else if (action.startsWith('check:')) {
+        try {
+          const result = await checkChatPayment(
+            action.slice(6),
+            userId
+          );
+
+          await tg('sendMessage', {
+            chat_id: chatId,
+            text: result
+          });
+
+        } catch (error) {
+          await tg('sendMessage', {
+            chat_id: chatId,
+            text: `❌ ${error.message}`
+          });
+        }
+      }
+
+      return;
+    }
+
+    if (!message?.text) return;
+
+    const chatId = message.chat.id;
+    const userId = message.from.id;
+    const input = message.text.trim();
+
+    if (input === '/start' || input.startsWith('/start ')) {
+      await sendMenu(chatId, message.from);
+      return;
+    }
+
+    if (input === '/help') {
+      await tg('sendMessage', {
+        chat_id: chatId,
+        text: 'Use the buttons below to browse products and manage your orders.',
+        reply_markup: MAIN_MENU
+      });
+      return;
+    }
+
+    if (input === '🛍️ Product Store') {
+      try {
+        await showProducts(chatId);
+      } catch (error) {
+        await tg('sendMessage', {
+          chat_id: chatId,
+          text: `❌ ${error.message}`
+        });
+      }
+      return;
+    }
+
+    if (input === '👤 My Profile') {
+      await tg('sendMessage', {
+        chat_id: chatId,
+        text:
+          `👤 MY PROFILE\n\n` +
+          `Name: ${message.from.first_name || 'User'}\n` +
+          `Username: ${message.from.username ? '@' + message.from.username : 'Not set'}\n` +
+          `Telegram ID: ${userId}\n\n` +
+          `🔥 FREE FIRE PANELS MARKETPLACE`,
+        reply_markup: MAIN_MENU
+      });
+      return;
+    }
+
+    if (input === '💳 My Balance') {
+      await tg('sendMessage', {
+        chat_id: chatId,
+        text:
+          '💳 MY BALANCE\n\n' +
+          'Wallet balance: ₹0.00\n\n' +
+          'Purchases are paid directly through UPI. This display is not a stored wallet.',
+        reply_markup: MAIN_MENU
+      });
+      return;
+    }
+
+    if (input === '📄 All Orders') {
+      if (!pool) {
+        await tg('sendMessage', {
+          chat_id: chatId,
+          text: 'Database is not configured.'
+        });
+        return;
+      }
+
+      const result = await pool.query(
+        `SELECT id, product_id, amount_paise, status, created_at
+         FROM orders
+         WHERE telegram_id=$1
+         ORDER BY created_at DESC
+         LIMIT 10`,
+        [String(userId)]
+      );
+
+      if (!result.rowCount) {
+        await tg('sendMessage', {
+          chat_id: chatId,
+          text: '📄 You have no orders yet.',
+          reply_markup: MAIN_MENU
+        });
+        return;
+      }
+
+      const orderText = result.rows.map((order, index) => {
+        let ids;
+
+        try {
+          ids = JSON.parse(order.product_id);
+        } catch {
+          ids = [order.product_id];
+        }
+
+        const names = ids.map(id =>
+          products.find(p => p.id === id)?.name || id
+        ).join(', ');
+
+        return (
+          `${index + 1}. ${names}\n` +
+          `Order: ${order.id}\n` +
+          `Amount: ₹${(order.amount_paise / 100).toFixed(2)}\n` +
+          `Status: ${order.status.toUpperCase()}`
+        );
+      }).join('\n\n');
+
+      await tg('sendMessage', {
+        chat_id: chatId,
+        text: `📄 YOUR ORDERS\n\n${orderText}`,
+        reply_markup: MAIN_MENU
+      });
+
+      return;
+    }
+
+    if (input === '🎁 Referral') {
+      const me = await tg('getMe', {});
+      const link = `https://t.me/${me.username}?start=ref_${userId}`;
+
+      await tg('sendMessage', {
+        chat_id: chatId,
+        text:
+          `🎁 YOUR REFERRAL LINK\n\n${link}\n\n` +
+          `Share this link with your friends! Referral rewards are not enabled yet.`,
+        reply_markup: MAIN_MENU
+      });
+
+      return;
+    }
+
+    if (input === '🧾 Check Payment') {
+      if (!pool) {
+        await tg('sendMessage', {
+          chat_id: chatId,
+          text: 'Database is not configured.'
+        });
+        return;
+      }
+
+      const result = await pool.query(
+        `SELECT ag_order_id FROM orders
+         WHERE telegram_id=$1 AND status='pending'
+         ORDER BY created_at DESC LIMIT 1`,
+        [String(userId)]
+      );
+
+      if (!result.rowCount) {
+        await tg('sendMessage', {
+          chat_id: chatId,
+          text: 'No pending payment found.',
+          reply_markup: MAIN_MENU
+        });
+        return;
+      }
+
+      try {
+        const status = await checkChatPayment(
+          result.rows[0].ag_order_id,
+          userId
+        );
+
+        await tg('sendMessage', {
+          chat_id: chatId,
+          text: status,
+          reply_markup: MAIN_MENU
+        });
+
+      } catch (error) {
+        await tg('sendMessage', {
+          chat_id: chatId,
+          text: `❌ ${error.message}`,
+          reply_markup: MAIN_MENU
+        });
+      }
+
+      return;
+    }
+
+    if (input === '🎬 Tutorial') {
+      await tg('sendMessage', {
+        chat_id: chatId,
+        text: process.env.TUTORIAL_URL
+          ? `🎬 Watch our tutorial:\n${process.env.TUTORIAL_URL}`
+          : '🎬 Tutorial will be available soon.',
+        reply_markup: MAIN_MENU
+      });
+
+      return;
+    }
+
+    if (input === '📞 Support') {
+      await tg('sendMessage', {
+        chat_id: chatId,
+        text: process.env.SUPPORT_URL
+          ? `📞 Contact support:\n${process.env.SUPPORT_URL}`
+          : '📞 Contact the shop administrator for support.',
+        reply_markup: MAIN_MENU
+      });
+
+      return;
+    }
+
+    await tg('sendMessage', {
+      chat_id: chatId,
+      text: '👇 Please select an option from the menu.',
+      reply_markup: MAIN_MENU
+    });
+
+  } catch (error) {
+    console.error('Telegram webhook error:', error);
+  }
+});
