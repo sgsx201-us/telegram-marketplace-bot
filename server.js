@@ -494,3 +494,261 @@ async function checkChatPayment(agOrderId, telegramId) {
 
   return '⏳ Payment is still pending. Please try again shortly.';
 }
+app.use('/ag-webhook', express.raw({ type: '*/*' }));
+app.use(express.json());
+app.use(express.static(path.join(dir, 'public')));
+
+app.get('/health', (_, res) => {
+  res.json({ ok: true });
+});
+
+app.get('/api/products', (_, res) => {
+  res.json(products);
+});
+
+// Legacy Mini App endpoints are retained for compatibility.
+// The Telegram bot menu does not require a Mini App.
+function validInit(initData) {
+  if (!BOT_TOKEN || !initData) return false;
+
+  const params = new URLSearchParams(initData);
+  const hash = params.get('hash');
+
+  if (!hash || !/^[a-f0-9]{64}$/i.test(hash)) return false;
+
+  params.delete('hash');
+
+  const checkString = [...params.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}=${value}`)
+    .join('\n');
+
+  const secret = crypto
+    .createHmac('sha256', 'WebAppData')
+    .update(BOT_TOKEN)
+    .digest();
+
+  const calculated = crypto
+    .createHmac('sha256', secret)
+    .update(checkString)
+    .digest('hex');
+
+  const a = Buffer.from(hash, 'hex');
+  const b = Buffer.from(calculated, 'hex');
+
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    return false;
+  }
+
+  const age = Date.now() / 1000 -
+    Number(params.get('auth_date') || 0);
+
+  return age >= 0 && age < 86400;
+}
+
+// Legacy API: create payment from a Mini App, if used.
+app.post('/api/create-order', async (req, res) => {
+  try {
+    if (!pool || !AG_API_KEY || !PUBLIC_BASE_URL) {
+      return res.status(503).json({
+        error: 'Set DATABASE_URL, AG_API_KEY and PUBLIC_BASE_URL in Railway.'
+      });
+    }
+
+    const { initData, productId } = req.body;
+
+    if (!validInit(initData)) {
+      return res.status(401).json({
+        error: 'Open the shop from Telegram.'
+      });
+    }
+
+    const user = JSON.parse(
+      new URLSearchParams(initData).get('user') || '{}'
+    );
+
+    const ids = Array.isArray(req.body.productIds)
+      ? [...new Set(req.body.productIds)]
+      : [productId];
+
+    if (!ids.length || ids.length > 20 || ids.some(id => !id)) {
+      return res.status(400).json({
+        error: 'Cart is empty or too large.'
+      });
+    }
+
+    const chosen = ids.map(id =>
+      products.find(item => item.id === id && item.active)
+    );
+
+    if (chosen.some(item => !item)) {
+      return res.status(404).json({
+        error: 'A product is unavailable.'
+      });
+    }
+
+    for (const item of chosen) {
+      const stock = await pool.query(
+        `SELECT id FROM stock
+         WHERE product_id=$1 AND used=FALSE
+         LIMIT 1`,
+        [item.id]
+      );
+
+      if (!stock.rowCount) {
+        return res.status(409).json({
+          error: `${item.name} is out of stock.`
+        });
+      }
+    }
+
+    const totalPaise = chosen.reduce(
+      (sum, item) => sum + Math.round(Number(item.price_inr) * 100),
+      0
+    );
+
+    if (!Number.isSafeInteger(totalPaise) || totalPaise <= 0) {
+      return res.status(400).json({
+        error: 'Invalid order amount.'
+      });
+    }
+
+    const callbackUrl =
+      `${PUBLIC_BASE_URL.replace(/\/$/, '')}/ag-webhook`;
+
+    const payment = await createAGPayment(
+      totalPaise / 100,
+      callbackUrl
+    );
+
+    const orderId = crypto.randomUUID();
+
+    await pool.query(
+      `INSERT INTO orders
+       (id, telegram_id, product_id, amount_paise, ag_order_id)
+       VALUES($1, $2, $3, $4, $5)`,
+      [
+        orderId,
+        String(user.id),
+        JSON.stringify(ids),
+        totalPaise,
+        payment.order_id
+      ]
+    );
+
+    res.json({
+      orderId,
+      agOrderId: payment.order_id,
+      payUrl: payment.pay_url,
+      upiLink: payment.upi_link,
+      qrPngUrl: payment.qr_png_url,
+      amount: payment.amount,
+      validSeconds: payment.valid_seconds
+    });
+
+  } catch (error) {
+    console.error('Create order error:', error);
+    res.status(500).json({
+      error: 'Could not create payment.'
+    });
+  }
+});
+
+// Legacy Mini App payment-status endpoint.
+app.post('/api/check-payment', async (req, res) => {
+  try {
+    if (!pool || !AG_API_KEY) {
+      return res.status(503).json({
+        error: 'Payment system is not configured.'
+      });
+    }
+
+    const { initData, agOrderId } = req.body;
+
+    if (!validInit(initData)) return res.sendStatus(401);
+
+    if (!agOrderId) {
+      return res.status(400).json({
+        error: 'Missing payment order ID.'
+      });
+    }
+
+    const user = JSON.parse(
+      new URLSearchParams(initData).get('user') || '{}'
+    );
+
+    const orderResult = await pool.query(
+      `SELECT * FROM orders
+       WHERE ag_order_id=$1 AND telegram_id=$2`,
+      [agOrderId, String(user.id)]
+    );
+
+    if (!orderResult.rowCount) {
+      return res.status(404).json({
+        error: 'Order not found.'
+      });
+    }
+
+    const order = orderResult.rows[0];
+
+    if (order.status === 'paid') {
+      return res.json({
+        status: 'PAID',
+        message: 'Payment already confirmed.'
+      });
+    }
+
+    const verification = await verifyAGPayment(agOrderId);
+    const data = verification.data || {};
+    const status = String(data.status || '').toUpperCase();
+
+    if (status === 'PAID') {
+      const receivedPaise = Math.round(Number(data.amount) * 100);
+
+      if (
+        !Number.isSafeInteger(receivedPaise) ||
+        receivedPaise !== order.amount_paise
+      ) {
+        await admin(
+          `PAYMENT AMOUNT MISMATCH\nOrder: ${order.id}\nAG order: ${agOrderId}`
+        );
+
+        return res.status(400).json({
+          error: 'Payment amount does not match.'
+        });
+      }
+
+      await fulfil(
+        agOrderId,
+        data.transaction_id || agOrderId,
+        data.utr || ''
+      );
+
+      return res.json({
+        status: 'PAID',
+        message: 'Payment verified. Check Telegram for delivery.'
+      });
+    }
+
+    if (status === 'EXPIRED') {
+      await pool.query(
+        `UPDATE orders SET status='expired'
+         WHERE ag_order_id=$1 AND status='pending'`,
+        [agOrderId]
+      );
+    }
+
+    res.json({
+      status: status || 'PENDING',
+      message: status === 'EXPIRED'
+        ? 'Payment expired. Please create a new order.'
+        : 'Waiting for payment.'
+    });
+
+  } catch (error) {
+    console.error('Payment verification error:', error);
+    res.status(500).json({
+      error: 'Could not verify payment.'
+    });
+  }
+});
