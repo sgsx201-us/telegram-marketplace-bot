@@ -1101,3 +1101,40 @@ app.post('/telegram-webhook', async (req, res) => {
     console.error('Telegram webhook error:', error);
   }
 });
+// Register Telegram webhook
+app.post('/admin/set-webhook', async (req, res) => {
+  if (
+    !process.env.SETUP_SECRET ||
+    req.headers['x-setup-secret'] !== process.env.SETUP_SECRET
+  ) {
+    return res.sendStatus(403);
+  }
+
+  try {
+    if (!PUBLIC_BASE_URL) {
+      throw new Error('PUBLIC_BASE_URL is missing');
+    }
+
+    const result = await tg('setWebhook', {
+      url: `${PUBLIC_BASE_URL.replace(/\/$/, '')}/telegram-webhook`
+    });
+
+    res.json({
+      ok: true,
+      result
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      error: error.message
+    });
+  }
+});
+
+// Initialize database
+await initDb();
+
+// Start server
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Listening on ${PORT}`);
+});
