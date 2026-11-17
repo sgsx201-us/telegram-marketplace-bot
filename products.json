@@ -1,9 +1,10 @@
+
 [
   {
     "id": "ff-panel-basic",
     "name": "Free Fire Basic Panel",
     "description": "Basic digital panel access",
-    "category": "Free Fire",
+    "category": "Android Non Root",
     "price_inr": 99,
     "active": true
   }
