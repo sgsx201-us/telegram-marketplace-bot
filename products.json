@@ -1,11 +1,90 @@
-
 [
   {
-    "id": "ff-panel-basic",
-    "name": "Free Fire Basic Panel",
-    "description": "Basic digital panel access",
+    "id": "prime-hook",
+    "name": "Prime Hook",
+    "description": "Prime Hook",
     "category": "Android Non Root",
-    "price_inr": 99,
+    "price_inr": 65,
+    "active": true
+  },
+  {
+    "id": "hg-chats-apk-mod",
+    "name": "Hg Chats Apk Mod",
+    "description": "Hg Chats Apk Mod",
+    "category": "Android Non Root",
+    "price_inr": 0,
+    "active": true
+  },
+  {
+    "id": "bala-mod-pro-v6",
+    "name": "Bala Mod Pro V6",
+    "description": "Bala Mod Pro V6",
+    "category": "Android Non Root",
+    "price_inr": 0,
+    "active": true
+  },
+  {
+    "id": "abcd-panel",
+    "name": "Abcd Panel",
+    "description": "Abcd Panel",
+    "category": "Android Non Root",
+    "price_inr": 0,
+    "active": true
+  },
+  {
+    "id": "drip-wire",
+    "name": "Drip Wire",
+    "description": "Drip Wire",
+    "category": "Android Non Root",
+    "price_inr": 0,
+    "active": true
+  },
+  {
+    "id": "drip-client-apkmod",
+    "name": "Drip Client Apkmod",
+    "description": "Drip Client Apkmod",
+    "category": "Android Non Root",
+    "price_inr": 0,
+    "active": true
+  },
+  {
+    "id": "z-rex-panel-nonroot",
+    "name": "Z Rex Panel Nonroot",
+    "description": "Z Rex Panel Nonroot",
+    "category": "Android Non Root",
+    "price_inr": 0,
+    "active": true
+  },
+  {
+    "id": "x-reg-panel",
+    "name": "X Reg Panel",
+    "description": "X Reg Panel",
+    "category": "Android Non Root",
+    "price_inr": 0,
+    "active": true
+  },
+  {
+    "id": "myth-android-ios",
+    "name": "Myth Android And iOS",
+    "description": "Myth Android And iOS",
+    "category": "Android Non Root",
+    "price_inr": 0,
+    "active": true
+  },
+  {
+    "id": "phantom-ff-all",
+    "name": "Phantom FF All",
+    "description": "Phantom FF All",
+    "category": "Android Non Root",
+    "price_inr": 0,
+    "active": true
+  },
+  {
+    "id": "silent-cheats-apkmod",
+    "name": "Silent Cheats Apkmod",
+    "description": "Silent Cheats Apkmod",
+    "category": "Android Non Root",
+    "price_inr": 0,
     "active": true
   }
 ]
