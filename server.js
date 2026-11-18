@@ -911,8 +911,6 @@ async function showProducts(chatId) {
   });
 }
 
-// Show available products in selected category
-
 // Show products in selected category
 async function showCategoryProducts(chatId, categoryId) {
   const category = STORE_CATEGORIES.find(
