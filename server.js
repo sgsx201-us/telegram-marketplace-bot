@@ -912,7 +912,42 @@ async function showProducts(chatId) {
 }
 
 // Show available products in selected category
+
+// Show products in selected category
 async function showCategoryProducts(chatId, categoryId) {
+  const category = STORE_CATEGORIES.find(
+    item => item.id === categoryId
+  );
+
+  if (!category) {
+    throw new Error('Invalid category.');
+  }
+
+  const available = products.filter(
+    p => p.active && p.category === category.value
+  );
+
+  const keyboard = available.map(item => [{
+    text: item.name,
+    callback_data: `buy:${item.id}`
+  }]);
+
+  keyboard.push([{
+    text: '⬅️ Back to Categories',
+    callback_data: 'store_categories'
+  }]);
+
+  await tg('sendMessage', {
+    chat_id: chatId,
+    text: available.length
+      ? `${category.label}\n\n➡️ Select a Product to continue: 👇`
+      : `${category.label}\n\nNo products have been added yet.`,
+    reply_markup: {
+      inline_keyboard: keyboard
+    }
+  });
+}
+
   if (!pool) {
     throw new Error('Database is not configured.');
   }
