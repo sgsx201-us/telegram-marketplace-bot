@@ -948,18 +948,58 @@ async function showCategoryProducts(chatId, categoryId) {
 }
 
 // Choose payment method for a product
+// Choose payment method for a product
 async function showPaymentMethods(chatId, productId) {
   const item = products.find(
     p => p.id === productId && p.active
   );
 
-  if (!item) throw new Error('Product unavailable.');
+  if (!item) {
+    throw new Error('Product unavailable.');
+  }
+
+  const price = Number(item.price_inr);
+
+  if (!Number.isFinite(price) || price <= 0) {
+    await tg('sendMessage', {
+      chat_id: chatId,
+      text: `📦 ${item.name}\n\n⏳ This product is coming soon.`,
+      reply_markup: {
+        inline_keyboard: [[{
+          text: '⬅️ Back to Products',
+          callback_data: 'category:android_non_root'
+        }]]
+      }
+    });
+    return;
+  }
+
+  const stock = await pool.query(
+    `SELECT id FROM stock
+     WHERE product_id=$1 AND used=FALSE
+     LIMIT 1`,
+    [item.id]
+  );
+
+  if (!stock.rowCount) {
+    await tg('sendMessage', {
+      chat_id: chatId,
+      text: `📦 ${item.name}\n\n⏳ Currently unavailable.`,
+      reply_markup: {
+        inline_keyboard: [[{
+          text: '⬅️ Back to Products',
+          callback_data: 'category:android_non_root'
+        }]]
+      }
+    });
+    return;
+  }
 
   await tg('sendMessage', {
     chat_id: chatId,
     text:
       `📦 ${item.name}\n` +
-      `💰 Price: ₹${Number(item.price_inr).toFixed(2)}\n\n` +
+      `💰 Price: ₹${price.toFixed(2)}\n\n` +
       `Choose your payment method:`,
     reply_markup: {
       inline_keyboard: [
