@@ -923,8 +923,9 @@ async function showCategoryProducts(chatId, categoryId) {
     throw new Error('Invalid category.');
   }
 
+  // Show all active products, even when stock is empty.
   const available = products.filter(
-    p => p.active && p.category === category.value
+    item => item.active && item.category === category.value
   );
 
   const keyboard = available.map(item => [{
@@ -942,56 +943,6 @@ async function showCategoryProducts(chatId, categoryId) {
     text: available.length
       ? `${category.label}\n\n➡️ Select a Product to continue: 👇`
       : `${category.label}\n\nNo products have been added yet.`,
-    reply_markup: {
-      inline_keyboard: keyboard
-    }
-  });
-}
-
-  if (!pool) {
-    throw new Error('Database is not configured.');
-  }
-
-  const category = STORE_CATEGORIES.find(
-    item => item.id === categoryId
-  );
-
-  if (!category) {
-    throw new Error('Invalid category.');
-  }
-
-  const available = [];
-
-  for (const item of products.filter(
-    p => p.active && p.category === category.value
-  )) {
-    const stock = await pool.query(
-      `SELECT COUNT(*)::int AS count
-       FROM stock
-       WHERE product_id=$1 AND used=FALSE`,
-      [item.id]
-    );
-
-    if (stock.rows[0].count > 0) {
-      available.push(item);
-    }
-  }
-
-  const keyboard = available.map(item => [{
-    text: `${item.name} — ₹${Number(item.price_inr).toFixed(2)}`,
-    callback_data: `buy:${item.id}`
-  }]);
-
-  keyboard.push([{
-    text: '⬅️ Back to Categories',
-    callback_data: 'store_categories'
-  }]);
-
-  await tg('sendMessage', {
-    chat_id: chatId,
-    text: available.length
-      ? `${category.label}\n\nSelect a product to purchase:`
-      : `${category.label}\n\n😔 No products are currently available in this category.`,
     reply_markup: {
       inline_keyboard: keyboard
     }
