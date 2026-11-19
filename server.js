@@ -912,6 +912,7 @@ async function showProducts(chatId) {
 }
 
 // Show products in selected category
+
 async function showCategoryProducts(chatId, categoryId) {
   const category = STORE_CATEGORIES.find(
     item => item.id === categoryId
@@ -921,10 +922,14 @@ async function showCategoryProducts(chatId, categoryId) {
     throw new Error('Invalid category.');
   }
 
-  // Show all active products, even when stock is empty.
-  const available = products.filter(
-    item => item.active && item.category === category.value
-  );
+  // Support products in multiple categories.
+  const available = products.filter(item => {
+    const categories = Array.isArray(item.categories)
+      ? item.categories
+      : [item.category];
+
+    return item.active && categories.includes(category.value);
+  });
 
   const keyboard = available.map(item => [{
     text: item.name,
