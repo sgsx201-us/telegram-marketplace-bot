@@ -37,7 +37,7 @@
     "name": "Drip Wire",
     "description": "Drip Wire",
     "category": "Android Non Root",
-    "categories": ["Android Non Root", "Android Root"],
+    "categories": ["Android Non Root", "Android Root", "iOS"],
     "price_inr": 0,
     "active": true
   },
@@ -62,7 +62,31 @@
     "name": "X Reg Panel",
     "description": "X Reg Panel",
     "category": "Android Non Root",
-    "categories": ["Android Non Root", "Android Root"],
+    "categories": ["Android Non Root", "Android Root", "iOS"],
+    "price_inr": 0,
+    "active": true
+  },
+  {
+    "id": "migul-pro-ios-india",
+    "name": "Migul Pro iOS India",
+    "description": "Migul Pro iOS India",
+    "category": "iOS",
+    "price_inr": 0,
+    "active": true
+  },
+  {
+    "id": "migul-pro-ios-other-server",
+    "name": "Migul Pro iOS Other Server",
+    "description": "Migul Pro iOS Other Server",
+    "category": "iOS",
+    "price_inr": 0,
+    "active": true
+  },
+  {
+    "id": "ios-phone-all-gbox-certificate",
+    "name": "iOS Phone All Gbox Certificate",
+    "description": "iOS Phone All Gbox Certificate",
+    "category": "iOS",
     "price_inr": 0,
     "active": true
   },
@@ -71,6 +95,7 @@
     "name": "Myth Android And iOS",
     "description": "Myth Android And iOS",
     "category": "Android Non Root",
+    "categories": ["Android Non Root", "iOS"],
     "price_inr": 0,
     "active": true
   },
@@ -79,7 +104,7 @@
     "name": "Phantom FF All",
     "description": "Phantom FF All",
     "category": "Android Non Root",
-    "categories": ["Android Non Root", "Android Root"],
+    "categories": ["Android Non Root", "Android Root", "iOS"],
     "price_inr": 0,
     "active": true
   },
