@@ -62,7 +62,7 @@
     "name": "X Reg Panel",
     "description": "X Reg Panel",
     "category": "Android Non Root",
-    "categories": ["Android Non Root", "Android Root", "iOS"],
+    "categories": ["Android Non Root", "Android Root", "iOS", "PC"],
     "price_inr": 0,
     "active": true
   },
