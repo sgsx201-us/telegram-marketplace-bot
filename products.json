@@ -1,3 +1,4 @@
+
 [
   {
     "id": "prime-hook",
@@ -36,8 +37,7 @@
     "name": "Drip Wire",
     "description": "Drip Wire",
     "category": "Android Non Root",
-"categories": ["Android Non Root", "Android Root"],
-    "category": "Android Non Root",
+    "categories": ["Android Non Root", "Android Root"],
     "price_inr": 0,
     "active": true
   },
@@ -62,8 +62,7 @@
     "name": "X Reg Panel",
     "description": "X Reg Panel",
     "category": "Android Non Root",
-    "category": "Android Non Root",
-"categories": ["Android Non Root", "Android Root"],
+    "categories": ["Android Non Root", "Android Root"],
     "price_inr": 0,
     "active": true
   },
@@ -80,8 +79,7 @@
     "name": "Phantom FF All",
     "description": "Phantom FF All",
     "category": "Android Non Root",
-"categories": ["Android Non Root", "Android Root"],
-    "category": "Android Non Root",
+    "categories": ["Android Non Root", "Android Root"],
     "price_inr": 0,
     "active": true
   },
