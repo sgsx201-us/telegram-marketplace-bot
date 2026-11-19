@@ -69,16 +69,29 @@ const MAX_WALLET_DEPOSIT = 50000;
 // Track the latest main menu for each chat
 const trackedMenuMessages = new Map();
 
-// Telegram helper with automatic main-menu cleanup
+
+// Telegram helper with colourful styling and automatic main-menu cleanup
 async function tg(method, body) {
   if (!BOT_TOKEN) throw new Error('BOT_TOKEN is missing');
+
+  const styledBody = { ...body };
+
+  if (method === 'sendMessage' && typeof body.text === 'string') {
+    styledBody.text =
+      `🌈━━━━━━━━━━━━━━━━━━━━🌈\n` +
+      `🔥 FREE FIRE PANELS MARKETPLACE 🔥\n` +
+      `━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `${body.text}\n\n` +
+      `━━━━━━━━━━━━━━━━━━━━\n` +
+      `✨ THANK YOU FOR SHOPPING! ✨`;
+  }
 
   const response = await fetch(
     `https://api.telegram.org/bot${BOT_TOKEN}/${method}`,
     {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body)
+      body: JSON.stringify(styledBody)
     }
   );
 
@@ -90,7 +103,6 @@ async function tg(method, body) {
 
   const result = data.result;
 
-  // Track and replace the previous main menu
   if (
     method === 'sendMessage' &&
     body.reply_markup?.keyboard &&
@@ -115,6 +127,7 @@ async function tg(method, body) {
 
   return result;
 }
+
 
 // Delete the latest tracked main menu
 async function deleteTrackedMenu(chatId) {
