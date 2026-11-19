@@ -66,7 +66,10 @@ const STORE_CATEGORIES = [
 const MIN_WALLET_DEPOSIT = 10;
 const MAX_WALLET_DEPOSIT = 50000;
 
-// Telegram helper
+// Track the latest main menu for each chat
+const trackedMenuMessages = new Map();
+
+// Telegram helper with automatic main-menu cleanup
 async function tg(method, body) {
   if (!BOT_TOKEN) throw new Error('BOT_TOKEN is missing');
 
@@ -85,7 +88,65 @@ async function tg(method, body) {
     throw new Error(data.description || 'Telegram API error');
   }
 
-  return data.result;
+  const result = data.result;
+
+  // Track and replace the previous main menu
+  if (
+    method === 'sendMessage' &&
+    body.reply_markup?.keyboard &&
+    result?.message_id
+  ) {
+    const chatKey = String(body.chat_id);
+    const previousMessageId = trackedMenuMessages.get(chatKey);
+
+    if (previousMessageId) {
+      try {
+        await tg('deleteMessage', {
+          chat_id: body.chat_id,
+          message_id: previousMessageId
+        });
+      } catch (error) {
+        console.log('Old menu could not be deleted:', error.message);
+      }
+    }
+
+    trackedMenuMessages.set(chatKey, result.message_id);
+  }
+
+  return result;
+}
+
+// Delete the latest tracked main menu
+async function deleteTrackedMenu(chatId) {
+  const chatKey = String(chatId);
+  const messageId = trackedMenuMessages.get(chatKey);
+
+  if (!messageId) return;
+
+  trackedMenuMessages.delete(chatKey);
+
+  try {
+    await tg('deleteMessage', {
+      chat_id: chatId,
+      message_id: messageId
+    });
+  } catch (error) {
+    console.log('Menu deletion failed:', error.message);
+  }
+}
+
+// Delete an inline menu after a button is selected
+async function deleteSelectedMenu(chatId, messageId) {
+  if (!chatId || !messageId) return;
+
+  try {
+    await tg('deleteMessage', {
+      chat_id: chatId,
+      message_id: messageId
+    });
+  } catch (error) {
+    console.log('Selected menu deletion failed:', error.message);
+  }
 }
 
 async function admin(message) {
@@ -912,7 +973,6 @@ async function showProducts(chatId) {
 }
 
 // Show products in selected category
-
 async function showCategoryProducts(chatId, categoryId) {
   const category = STORE_CATEGORIES.find(
     item => item.id === categoryId
@@ -922,7 +982,7 @@ async function showCategoryProducts(chatId, categoryId) {
     throw new Error('Invalid category.');
   }
 
-  // Support products in multiple categories.
+  // Support products in multiple categories
   const available = products.filter(item => {
     const categories = Array.isArray(item.categories)
       ? item.categories
@@ -952,7 +1012,6 @@ async function showCategoryProducts(chatId, categoryId) {
   });
 }
 
-// Choose payment method for a product
 // Choose payment method for a product
 async function showPaymentMethods(chatId, productId) {
   const item = products.find(
@@ -1556,6 +1615,12 @@ app.post('/telegram-webhook', async (req, res) => {
         callback_query_id: callback.id
       });
 
+      // Delete the inline menu after the customer selects a button
+      await deleteSelectedMenu(
+        chatId,
+        callback.message?.message_id
+      );
+
       try {
         // Return to store categories
         if (action === 'store_categories') {
@@ -1686,6 +1751,9 @@ app.post('/telegram-webhook', async (req, res) => {
     const chatId = message.chat.id;
     const userId = message.from.id;
     const input = message.text.trim();
+
+    // Remove the previous main menu after a customer sends a selection
+    await deleteTrackedMenu(chatId);
 
     if (input === '/start' || input.startsWith('/start ')) {
       await pool.query(
