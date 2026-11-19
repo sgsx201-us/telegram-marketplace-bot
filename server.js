@@ -2047,9 +2047,51 @@ app.post('/admin/set-webhook', async (req, res) => {
   }
 });
 
+// Retrieve products from ARPAN reseller API
+// This only reads the product list. It does NOT buy anything.
+async function getArpanProducts() {
+  const arpanApiKey = process.env.ARPAN_API_KEY;
+
+  if (!arpanApiKey) {
+    console.error('ARPAN_API_KEY is missing in Railway Variables.');
+    return;
+  }
+
+  try {
+    const body = new URLSearchParams({
+      api_key: arpanApiKey,
+      action: 'products'
+    });
+
+    const response = await fetch(
+      'https://arpanxlive.site/api/reseller_v1.php',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body,
+        signal: AbortSignal.timeout(20000)
+      }
+    );
+
+    const result = await response.text();
+
+    console.log('========== ARPAN PRODUCTS ==========');
+    console.log('HTTP Status:', response.status);
+    console.log(result);
+    console.log('====================================');
+  } catch (error) {
+    console.error('ARPAN products error:', error.message);
+  }
+}
+
 // Initialize database and start server
 await initDb();
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Listening on ${PORT}`);
 });
+
+// Retrieve ARPAN products after the server starts
+getArpanProducts();
