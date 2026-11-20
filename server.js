@@ -585,6 +585,8 @@ async function initDb() {
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS fulfillment_error TEXT;
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS fulfillment_started_at TIMESTAMPTZ;
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS supplier_result JSONB;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_total_paise BIGINT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS wallet_used_paise BIGINT NOT NULL DEFAULT 0;
 
     CREATE INDEX IF NOT EXISTS orders_telegram_id_idx
     ON orders(telegram_id);
