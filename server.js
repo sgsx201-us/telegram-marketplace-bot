@@ -1,4 +1,3 @@
-
 import 'dotenv/config';
 import express from 'express';
 import crypto from 'crypto';
@@ -431,7 +430,6 @@ async function getLiveProducts() {
   } catch (error) {
     console.error('ARPAN catalogue unavailable:', error.message);
 
-    // Do not use old cached stock to allow purchases.
     return products.map(item => ({
       ...item,
       plans: (item.plans || []).map(plan => ({
@@ -539,14 +537,15 @@ async function buyFromArpan(orderItem) {
   const code = Number(raw.code || data.code || response.httpStatus);
   const message = raw.message || data.message || 'ARPAN purchase failed.';
 
-  // These documented responses mean the supplier rejected the purchase.
-  if ([402, 404, 409].includes(code) || [402, 404, 409].includes(response.httpStatus)) {
+  if (
+    [402, 404, 409].includes(code) ||
+    [402, 404, 409].includes(response.httpStatus)
+  ) {
     const error = new Error(message);
     error.definiteFailure = true;
     throw error;
   }
 
-  // An unknown response may mean the supplier processed the order.
   const error = new Error(message);
   error.ambiguous = true;
   throw error;
@@ -567,7 +566,7 @@ async function initDb() {
       id TEXT PRIMARY KEY,
       telegram_id TEXT NOT NULL,
       product_id TEXT NOT NULL,
-      amount_paise INTEGER NOT NULL,
+      amount_paise BIGINT NOT NULL,
       razorpay_order_id TEXT UNIQUE,
       ag_order_id TEXT UNIQUE,
       status TEXT NOT NULL DEFAULT 'pending',
@@ -585,8 +584,10 @@ async function initDb() {
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS fulfillment_error TEXT;
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS fulfillment_started_at TIMESTAMPTZ;
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS supplier_result JSONB;
+
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_total_paise BIGINT;
-ALTER TABLE orders ADD COLUMN IF NOT EXISTS wallet_used_paise BIGINT NOT NULL DEFAULT 0;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS wallet_used_paise BIGINT NOT NULL DEFAULT 0;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_method TEXT;
 
     CREATE INDEX IF NOT EXISTS orders_telegram_id_idx
     ON orders(telegram_id);
@@ -936,12 +937,15 @@ async function showWalletHistory(chatId, telegramId) {
     reply_markup: MAIN_MENU
   });
 }
-
 // --------------------------------------------------
-// ORDER FULFILMENT
+// ORDER FULFILMENT AND REFUNDS
 // --------------------------------------------------
 
 async function refundWalletOrder(orderId, telegramId, amountPaise, reason) {
+  const amount = Number(amountPaise);
+
+  if (!Number.isSafeInteger(amount) || amount <= 0) return false;
+
   const client = await pool.connect();
 
   try {
@@ -956,7 +960,7 @@ async function refundWalletOrder(orderId, telegramId, amountPaise, reason) {
 
     if (existing.rowCount) {
       await client.query('COMMIT');
-      return;
+      return false;
     }
 
     await client.query(
@@ -971,7 +975,7 @@ async function refundWalletOrder(orderId, telegramId, amountPaise, reason) {
        SET balance_paise=balance_paise+$1,
            updated_at=NOW()
        WHERE telegram_id=$2`,
-      [amountPaise, String(telegramId)]
+      [amount, String(telegramId)]
     );
 
     await client.query(
@@ -980,15 +984,259 @@ async function refundWalletOrder(orderId, telegramId, amountPaise, reason) {
        VALUES($1, 'credit', $2, $3, $4)`,
       [
         String(telegramId),
-        amountPaise,
+        amount,
         reference,
         `Refund: ${reason}`
       ]
     );
 
     await client.query('COMMIT');
+    return true;
   } catch (error) {
     await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+// Creates an order using wallet balance first and UPI for the remainder.
+async function createHybridOrder(telegramId, orderItems) {
+  if (!pool) throw new Error('Database is not configured.');
+  if (!Array.isArray(orderItems) || !orderItems.length) {
+    throw new Error('Order is empty.');
+  }
+
+  const totalPaise = orderItems.reduce((sum, item) => {
+    const unitPaise = rupeesToPaise(item.unit_price_inr);
+    const quantity = Number(item.quantity || 1);
+
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) {
+      throw new Error('Invalid order quantity.');
+    }
+
+    return sum + unitPaise * quantity;
+  }, 0);
+
+  if (!Number.isSafeInteger(totalPaise) || totalPaise <= 0) {
+    throw new Error('Invalid order amount.');
+  }
+
+  const orderId = crypto.randomUUID();
+  const productIds = [...new Set(orderItems.map(item => item.product_id))];
+
+  const client = await pool.connect();
+  let payment = null;
+  let committed = false;
+
+  try {
+    await client.query('BEGIN');
+
+    await client.query(
+      `INSERT INTO wallets(telegram_id, balance_paise)
+       VALUES($1, 0)
+       ON CONFLICT(telegram_id) DO NOTHING`,
+      [String(telegramId)]
+    );
+
+    const wallet = await client.query(
+      `SELECT balance_paise FROM wallets
+       WHERE telegram_id=$1 FOR UPDATE`,
+      [String(telegramId)]
+    );
+
+    const balance = Number(wallet.rows[0].balance_paise);
+    const walletUsed = Math.min(balance, totalPaise);
+    const upiAmount = totalPaise - walletUsed;
+
+    // Create a UPI payment only for the amount not covered by wallet.
+    if (upiAmount > 0) {
+      payment = await createAGPayment(
+        upiAmount / 100,
+        getCallbackUrl()
+      );
+    }
+
+    await client.query(
+      `INSERT INTO orders
+       (id, telegram_id, product_id, amount_paise, ag_order_id,
+        order_items, order_total_paise, wallet_used_paise,
+        payment_method, payment_id)
+       VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10)`,
+      [
+        orderId,
+        String(telegramId),
+        JSON.stringify(productIds),
+        upiAmount > 0 ? upiAmount : totalPaise,
+        payment?.order_id || null,
+        JSON.stringify(orderItems),
+        totalPaise,
+        walletUsed,
+        upiAmount > 0 ? 'upi_wallet' : 'wallet',
+        upiAmount > 0 ? 'upi_wallet' : 'wallet'
+      ]
+    );
+
+    if (walletUsed > 0) {
+      await client.query(
+        `UPDATE wallets
+         SET balance_paise=balance_paise-$1,
+             updated_at=NOW()
+         WHERE telegram_id=$2`,
+        [walletUsed, String(telegramId)]
+      );
+
+      await client.query(
+        `INSERT INTO wallet_transactions
+         (telegram_id, type, amount_paise, reference, description)
+         VALUES($1, 'debit', $2, $3, $4)`,
+        [
+          String(telegramId),
+          walletUsed,
+          `purchase:${orderId}`,
+          `Wallet contribution to order ${orderId}`
+        ]
+      );
+    }
+
+    await client.query('COMMIT');
+    committed = true;
+
+    return {
+      orderId,
+      payment,
+      totalPaise,
+      walletUsed,
+      upiAmount
+    };
+  } catch (error) {
+    if (!committed) {
+      await client.query('ROLLBACK').catch(() => {});
+    }
+
+    if (payment?.order_id) {
+      await admin(
+        `HYBRID ORDER CREATION ERROR\nCustomer: ${telegramId}\nAG Order: ${payment.order_id}\nError: ${error.message}\nCheck the gateway payment before taking further action.`
+      );
+    }
+
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+// Return the wallet contribution if an unpaid UPI order expires.
+// This does not refund any UPI payment made to the gateway.
+async function refundExpiredHybridOrder(agOrderId) {
+  if (!pool || !agOrderId) return false;
+
+  const client = await pool.connect();
+  let telegramId = null;
+  let orderId = null;
+  let refundAmount = 0;
+
+  try {
+    await client.query('BEGIN');
+
+    const result = await client.query(
+      `SELECT * FROM orders
+       WHERE ag_order_id=$1
+       FOR UPDATE`,
+      [agOrderId]
+    );
+
+    if (!result.rowCount) {
+      await client.query('ROLLBACK');
+      return false;
+    }
+
+    const order = result.rows[0];
+
+    if (order.status !== 'pending') {
+      await client.query('ROLLBACK');
+      return false;
+    }
+
+    if (
+      ['processing', 'delivered', 'manual_review', 'supplier_failed'].includes(
+        order.fulfillment_status
+      )
+    ) {
+      await client.query('ROLLBACK');
+      return false;
+    }
+
+    telegramId = order.telegram_id;
+    orderId = order.id;
+    refundAmount = Number(order.wallet_used_paise || 0);
+
+    if (refundAmount > 0) {
+      const reference = `refund:${order.id}`;
+
+      const existing = await client.query(
+        'SELECT id FROM wallet_transactions WHERE reference=$1',
+        [reference]
+      );
+
+      if (!existing.rowCount) {
+        await client.query(
+          `INSERT INTO wallets(telegram_id, balance_paise)
+           VALUES($1, 0)
+           ON CONFLICT(telegram_id) DO NOTHING`,
+          [String(telegramId)]
+        );
+
+        await client.query(
+          `UPDATE wallets
+           SET balance_paise=balance_paise+$1,
+               updated_at=NOW()
+           WHERE telegram_id=$2`,
+          [refundAmount, String(telegramId)]
+        );
+
+        await client.query(
+          `INSERT INTO wallet_transactions
+           (telegram_id, type, amount_paise, reference, description)
+           VALUES($1, 'credit', $2, $3, $4)`,
+          [
+            String(telegramId),
+            refundAmount,
+            reference,
+            `Wallet refund for expired order ${order.id}`
+          ]
+        );
+      }
+    }
+
+    await client.query(
+      `UPDATE orders
+       SET status='expired',
+           fulfillment_status='expired'
+       WHERE id=$1 AND status='pending'`,
+      [order.id]
+    );
+
+    await client.query('COMMIT');
+
+    if (refundAmount > 0) {
+      await tg('sendMessage', {
+        chat_id: telegramId,
+        text:
+          `⌛ Your order payment expired.\n\n` +
+          `Wallet amount returned: ₹${formatRupees(refundAmount)}\n` +
+          `Any UPI payment must be handled separately by support.\n` +
+          `Order: ${orderId}`
+      }).catch(() => {});
+    }
+
+    await admin(
+      `ORDER EXPIRED\nOrder: ${orderId}\nCustomer: ${telegramId}\nWallet returned: ₹${formatRupees(refundAmount)}\nAG order: ${agOrderId}`
+    );
+
+    return true;
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
     throw error;
   } finally {
     client.release();
@@ -1191,7 +1439,6 @@ async function processArpanOrder(orderId, paymentId = '', utr = '') {
         }
       });
 
-      // Persist each successful supplier response immediately.
       await pool.query(
         `UPDATE orders
          SET supplier_result=$1::jsonb
@@ -1269,7 +1516,7 @@ async function processArpanOrder(orderId, paymentId = '', utr = '') {
     }
 
     await admin(
-      `ARPAN ORDER DELIVERED\nOrder: ${orderId}\nCustomer: ${order.telegram_id}\nAmount: ₹${formatRupees(order.amount_paise)}\nKeys delivered: ${deliveredQuantity}`
+      `ARPAN ORDER DELIVERED\nOrder: ${orderId}\nCustomer: ${order.telegram_id}\nTotal order amount: ₹${formatRupees(order.order_total_paise || order.amount_paise)}\nKeys delivered: ${deliveredQuantity}`
     );
 
     return { status: 'paid' };
@@ -1296,17 +1543,27 @@ async function processArpanOrder(orderId, paymentId = '', utr = '') {
       ]
     );
 
-    // Refund wallet purchases only when ARPAN definitely rejected
-    // the purchase and no keys were purchased.
+    // Refund only the wallet contribution after a definite supplier rejection.
+    // UPI refunds are not performed by this code.
+    const method = order.payment_method || (
+      order.payment_id === 'wallet' ? 'wallet' : 'upi'
+    );
+
+    const walletRefund = method === 'upi_wallet'
+      ? Number(order.wallet_used_paise || 0)
+      : method === 'wallet'
+        ? Number(order.wallet_used_paise || order.amount_paise)
+        : 0;
+
     if (
       definiteFailure &&
       successfulQuantity === 0 &&
-      order.payment_id === 'wallet'
+      walletRefund > 0
     ) {
       await refundWalletOrder(
         order.id,
         order.telegram_id,
-        Number(order.amount_paise),
+        walletRefund,
         error.message
       );
 
@@ -1318,19 +1575,35 @@ async function processArpanOrder(orderId, paymentId = '', utr = '') {
         [orderId]
       );
 
+      const hybrid = method === 'upi_wallet';
+
       await tg('sendMessage', {
         chat_id: order.telegram_id,
-        text:
-          `⚠️ Supplier could not fulfil your order.\n\n` +
-          `Your wallet payment has been refunded.\n` +
-          `Order: ${orderId}`
+        text: hybrid
+          ? (
+              `⚠️ Supplier could not fulfil your order.\n\n` +
+              `Wallet amount returned: ₹${formatRupees(walletRefund)}\n` +
+              `Your UPI payment requires separate admin refund handling.\n` +
+              `Please contact support.\nOrder: ${orderId}`
+            )
+          : (
+              `⚠️ Supplier could not fulfil your order.\n\n` +
+              `Your wallet payment has been refunded.\n` +
+              `Order: ${orderId}`
+            )
       }).catch(() => {});
 
       await admin(
-        `WALLET ORDER REFUNDED\nOrder: ${orderId}\nCustomer: ${order.telegram_id}\nReason: ${error.message}`
+        `WALLET CONTRIBUTION REFUNDED\nOrder: ${orderId}\nCustomer: ${order.telegram_id}\nWallet refund: ₹${formatRupees(walletRefund)}\nPayment method: ${method}\n${hybrid ? 'UPI portion needs manual refund handling.' : ''}\nReason: ${error.message}`
       );
 
       return { status: 'supplier_failed' };
+    }
+
+    if (definiteFailure && successfulQuantity === 0 && method === 'upi_wallet') {
+      await admin(
+        `HYBRID ORDER SUPPLIER FAILURE\nOrder: ${orderId}\nCustomer: ${order.telegram_id}\nWallet contribution: ₹${formatRupees(order.wallet_used_paise)}\nUPI amount: ₹${formatRupees(order.amount_paise)}\nNo wallet contribution was available to refund. Check whether the UPI payment needs manual refund handling.\nReason: ${error.message}`
+      );
     }
 
     await admin(
@@ -1491,11 +1764,11 @@ async function showPlanPaymentMethods(chatId, productId, durationId) {
     reply_markup: {
       inline_keyboard: [
         [{
-          text: '💳 Pay with UPI',
+          text: '💳 Pay with UPI + Wallet',
           callback_data: `upibuy:${item.id}:${plan.duration_id}`
         }],
         [{
-          text: '👛 Pay with Wallet',
+          text: '👛 Pay with Wallet Only',
           callback_data: `walletbuy:${item.id}:${plan.duration_id}`
         }],
         [{
@@ -1508,12 +1781,12 @@ async function showPlanPaymentMethods(chatId, productId, durationId) {
 }
 
 // --------------------------------------------------
-// CREATE UPI ORDER FOR TELEGRAM
+// CREATE TELEGRAM ORDER: WALLET + UPI
 // --------------------------------------------------
 
 async function createChatOrder(chatId, telegramId, productId, durationId) {
-  if (!pool || !PUBLIC_BASE_URL) {
-    throw new Error('Payment system is not configured.');
+  if (!pool) {
+    throw new Error('Database is not configured.');
   }
 
   const item = findProduct(productId);
@@ -1525,37 +1798,64 @@ async function createChatOrder(chatId, telegramId, productId, durationId) {
 
   if (!availability.available) throw new Error('This plan is out of stock.');
 
-  const amountPaise = getPlanPricePaise(plan);
-
-  if (!amountPaise) throw new Error('Invalid product price.');
-
   const orderItem = getPlanSnapshot(item, plan, 1);
 
-  const payment = await createAGPayment(
-    amountPaise / 100,
-    getCallbackUrl()
+  const created = await createHybridOrder(
+    telegramId,
+    [orderItem]
   );
 
-  const orderId = crypto.randomUUID();
+  const {
+    orderId,
+    payment,
+    totalPaise,
+    walletUsed,
+    upiAmount
+  } = created;
 
-  await pool.query(
-    `INSERT INTO orders
-     (id, telegram_id, product_id, amount_paise, ag_order_id, order_items)
-     VALUES($1, $2, $3, $4, $5, $6::jsonb)`,
-    [
-      orderId,
-      String(telegramId),
-      JSON.stringify([item.id]),
-      amountPaise,
-      payment.order_id,
-      JSON.stringify([orderItem])
-    ]
+  await admin(
+    `NEW TELEGRAM ORDER\nOrder: ${orderId}\nCustomer: ${telegramId}\nProduct: ${item.name}\nDuration: ${plan.duration}\nTotal: ₹${formatRupees(totalPaise)}\nWallet: ₹${formatRupees(walletUsed)}\nUPI: ₹${formatRupees(upiAmount)}`
   );
+
+  if (upiAmount === 0) {
+    await tg('sendMessage', {
+      chat_id: chatId,
+      text:
+        `✅ ORDER PAID USING WALLET!\n\n` +
+        `📦 Product: ${item.name}\n` +
+        `⏳ Duration: ${plan.duration}\n` +
+        `💰 Total: ₹${formatRupees(totalPaise)}\n` +
+        `👛 Wallet used: ₹${formatRupees(walletUsed)}\n` +
+        `💳 UPI required: ₹0.00\n` +
+        `🆔 Order: ${orderId}\n\n` +
+        `Your order is being processed automatically.`
+    });
+
+    const fulfillment = await processArpanOrder(orderId, 'wallet');
+
+    if (fulfillment.status === 'manual_review') {
+      await tg('sendMessage', {
+        chat_id: chatId,
+        text:
+          `⚠️ Your wallet payment was received, but delivery needs admin review.\n` +
+          `Please do not purchase again.\nOrder: ${orderId}`
+      });
+    } else if (fulfillment.status === 'supplier_failed') {
+      await tg('sendMessage', {
+        chat_id: chatId,
+        text:
+          `⚠️ Supplier could not fulfil your order.\n` +
+          `Your wallet contribution has been refunded.\nOrder: ${orderId}`
+      });
+    }
+
+    return;
+  }
 
   const buttons = [];
 
-  if (payment.pay_url) {
-    buttons.push([{ text: '💳 PAY NOW', url: payment.pay_url }]);
+  if (payment?.pay_url) {
+    buttons.push([{ text: '💳 PAY REMAINING UPI AMOUNT', url: payment.pay_url }]);
   }
 
   buttons.push([{
@@ -1568,150 +1868,20 @@ async function createChatOrder(chatId, telegramId, productId, durationId) {
     text:
       `🔥 ORDER CREATED!\n\n` +
       `📦 Product: ${item.name}\n` +
-      `⏳ Duration: ${plan.duration}\n` +
-      `💰 Amount: ₹${formatRupees(amountPaise)}\n` +
+      `⏳ Duration: ${plan.duration}\n\n` +
+      `💰 Total price: ₹${formatRupees(totalPaise)}\n` +
+      `👛 Wallet used: ₹${formatRupees(walletUsed)}\n` +
+      `💳 UPI remaining: ₹${formatRupees(upiAmount)}\n\n` +
       `🆔 Order: ${orderId}\n\n` +
-      `Complete your UPI payment, then press CHECK PAYMENT.`,
+      `Pay only the remaining UPI amount, then press CHECK PAYMENT.`,
     reply_markup: { inline_keyboard: buttons }
   });
-
-  await admin(
-    `NEW ARPAN ORDER CREATED\nOrder: ${orderId}\nCustomer: ${telegramId}\nProduct: ${item.name}\nDuration: ${plan.duration}\nAmount: ₹${formatRupees(amountPaise)}`
-  );
 }
 
 // --------------------------------------------------
-// WALLET PRODUCT PURCHASE
-// --------------------------------------------------
-// --------------------------------------------------
-// HYBRID CHECKOUT: WALLET FIRST, THEN UPI
+// WALLET-ONLY PRODUCT PURCHASE
 // --------------------------------------------------
 
-async function createHybridOrder(telegramId, orderItems) {
-  if (!pool || !AG_API_KEY || !PUBLIC_BASE_URL) {
-    throw new Error('Payment system is not configured.');
-  }
-
-  const totalPaise = orderItems.reduce((sum, item) => {
-    return sum +
-      rupeesToPaise(item.unit_price_inr) * Number(item.quantity);
-  }, 0);
-
-  if (!Number.isSafeInteger(totalPaise) || totalPaise <= 0) {
-    throw new Error('Invalid order amount.');
-  }
-
-  const orderId = crypto.randomUUID();
-  const productIds = [
-    ...new Set(orderItems.map(item => item.product_id))
-  ];
-
-  const client = await pool.connect();
-
-  try {
-    await client.query('BEGIN');
-
-    await client.query(
-      `INSERT INTO wallets(telegram_id, balance_paise)
-       VALUES($1, 0)
-       ON CONFLICT(telegram_id) DO NOTHING`,
-      [String(telegramId)]
-    );
-
-    const walletResult = await client.query(
-      `SELECT balance_paise
-       FROM wallets
-       WHERE telegram_id=$1
-       FOR UPDATE`,
-      [String(telegramId)]
-    );
-
-    const balancePaise = Number(walletResult.rows[0].balance_paise);
-    const walletUsedPaise = Math.min(balancePaise, totalPaise);
-    const upiAmountPaise = totalPaise - walletUsedPaise;
-
-    // Full wallet payment should use the existing wallet checkout.
-    if (upiAmountPaise <= 0) {
-      await client.query('ROLLBACK');
-
-      return {
-        walletOnlyRequired: true,
-        totalPaise,
-        balancePaise
-      };
-    }
-
-    // Keep the wallet row locked while creating the payment.
-    const payment = await createAGPayment(
-      upiAmountPaise / 100,
-      getCallbackUrl()
-    );
-
-    if (walletUsedPaise > 0) {
-      await client.query(
-        `UPDATE wallets
-         SET balance_paise=balance_paise-$1,
-             updated_at=NOW()
-         WHERE telegram_id=$2`,
-        [walletUsedPaise, String(telegramId)]
-      );
-
-      await client.query(
-        `INSERT INTO wallet_transactions
-         (telegram_id, type, amount_paise, reference, description)
-         VALUES($1, 'debit', $2, $3, $4)`,
-        [
-          String(telegramId),
-          walletUsedPaise,
-          `purchase:${orderId}`,
-          'Wallet contribution to UPI product order'
-        ]
-      );
-    }
-
-    await client.query(
-      `INSERT INTO orders
-       (
-         id,
-         telegram_id,
-         product_id,
-         amount_paise,
-         ag_order_id,
-         order_items,
-         payment_id,
-         order_total_paise,
-         wallet_used_paise
-       )
-       VALUES($1, $2, $3, $4, $5, $6::jsonb, 'upi_wallet', $7, $8)`,
-      [
-        orderId,
-        String(telegramId),
-        JSON.stringify(productIds),
-        upiAmountPaise,
-        payment.order_id,
-        JSON.stringify(orderItems),
-        totalPaise,
-        walletUsedPaise
-      ]
-    );
-
-    await client.query('COMMIT');
-
-    return {
-      walletOnlyRequired: false,
-      orderId,
-      payment,
-      totalPaise,
-      walletUsedPaise,
-      upiAmountPaise
-    };
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
-}
 async function purchaseWithWallet(chatId, telegramId, productId, durationId) {
   if (!pool) throw new Error('Database is not configured.');
 
@@ -1770,8 +1940,10 @@ async function purchaseWithWallet(chatId, telegramId, productId, durationId) {
 
     await client.query(
       `INSERT INTO orders
-       (id, telegram_id, product_id, amount_paise, status, payment_id, order_items)
-       VALUES($1, $2, $3, $4, 'pending', 'wallet', $5::jsonb)`,
+       (id, telegram_id, product_id, amount_paise, status,
+        payment_id, order_items, order_total_paise,
+        wallet_used_paise, payment_method)
+       VALUES($1, $2, $3, $4, 'pending', 'wallet', $5::jsonb, $4, $4, 'wallet')`,
       [
         orderId,
         String(telegramId),
@@ -1854,6 +2026,10 @@ async function checkChatPayment(agOrderId, telegramId) {
     return '✅ Payment confirmed. Your product was delivered.';
   }
 
+  if (order.status === 'expired') {
+    return '⌛ Payment expired. Any wallet contribution has been returned.';
+  }
+
   if (order.fulfillment_status === 'manual_review') {
     return '⚠️ Your payment was received. Your order is being reviewed by the administrator.';
   }
@@ -1907,18 +2083,12 @@ async function checkChatPayment(agOrderId, telegramId) {
   }
 
   if (status === 'EXPIRED') {
-    await pool.query(
-      `UPDATE orders SET status='expired'
-       WHERE ag_order_id=$1 AND status='pending'`,
-      [agOrderId]
-    );
-
-    return '⌛ Payment expired. Please create a new order.';
+    await refundExpiredHybridOrder(agOrderId);
+    return '⌛ Payment expired. Any wallet contribution has been returned.';
   }
 
   return '⏳ Payment is still pending. Please try again shortly.';
 }
-
 // --------------------------------------------------
 // EXPRESS AND MINI APP
 // --------------------------------------------------
@@ -1992,9 +2162,9 @@ function getTelegramUser(initData) {
 // Expected items: [{ productId, durationId, quantity }]
 app.post('/api/create-order', async (req, res) => {
   try {
-    if (!pool || !AG_API_KEY || !PUBLIC_BASE_URL) {
+    if (!pool) {
       return res.status(503).json({
-        error: 'Payment system is not configured.'
+        error: 'Database is not configured.'
       });
     }
 
@@ -2025,7 +2195,6 @@ app.post('/api/create-order', async (req, res) => {
     }
 
     const orderItems = [];
-    let totalPaise = 0;
 
     for (const input of inputItems) {
       const item = findProduct(input.productId);
@@ -2060,51 +2229,90 @@ app.post('/api/create-order', async (req, res) => {
         });
       }
 
-      totalPaise += unitPaise * quantity;
       orderItems.push(getPlanSnapshot(item, plan, quantity));
     }
 
-    if (!Number.isSafeInteger(totalPaise) || totalPaise <= 0) {
-      return res.status(400).json({
-        error: 'Invalid order amount.'
+    const created = await createHybridOrder(
+      user.id,
+      orderItems
+    );
+
+    const {
+      orderId,
+      payment,
+      totalPaise,
+      walletUsed,
+      upiAmount
+    } = created;
+
+    await admin(
+      `NEW MINI APP ORDER\nOrder: ${orderId}\nCustomer: ${user.id}\nTotal: ₹${formatRupees(totalPaise)}\nWallet used: ₹${formatRupees(walletUsed)}\nUPI remaining: ₹${formatRupees(upiAmount)}`
+    );
+
+    // Wallet covers the complete order. No UPI payment is needed.
+    if (upiAmount === 0) {
+      const fulfillment = await processArpanOrder(orderId, 'wallet');
+
+      if (fulfillment.status === 'paid') {
+        return res.json({
+          orderId,
+          status: 'PAID',
+          paymentMethod: 'wallet',
+          totalAmount: formatRupees(totalPaise),
+          walletUsed: formatRupees(walletUsed),
+          amount: '0.00',
+          message: 'Wallet payment successful and product delivered.'
+        });
+      }
+
+      if (fulfillment.status === 'manual_review') {
+        return res.json({
+          orderId,
+          status: 'MANUAL_REVIEW',
+          paymentMethod: 'wallet',
+          totalAmount: formatRupees(totalPaise),
+          walletUsed: formatRupees(walletUsed),
+          amount: '0.00',
+          message: 'Wallet payment received. Admin review is required.'
+        });
+      }
+
+      if (fulfillment.status === 'supplier_failed') {
+        return res.json({
+          orderId,
+          status: 'SUPPLIER_FAILED',
+          paymentMethod: 'wallet',
+          totalAmount: formatRupees(totalPaise),
+          walletUsed: formatRupees(walletUsed),
+          amount: '0.00',
+          message: 'Supplier could not fulfil the order. Wallet contribution refunded.'
+        });
+      }
+
+      return res.json({
+        orderId,
+        status: 'PROCESSING',
+        paymentMethod: 'wallet',
+        totalAmount: formatRupees(totalPaise),
+        walletUsed: formatRupees(walletUsed),
+        amount: '0.00',
+        message: 'Wallet payment received. Your product is processing.'
       });
     }
 
-    const payment = await createAGPayment(
-      totalPaise / 100,
-      getCallbackUrl()
-    );
-
-    const orderId = crypto.randomUUID();
-
-    const productIds = [...new Set(orderItems.map(item => item.product_id))];
-
-    await pool.query(
-      `INSERT INTO orders
-       (id, telegram_id, product_id, amount_paise, ag_order_id, order_items)
-       VALUES($1, $2, $3, $4, $5, $6::jsonb)`,
-      [
-        orderId,
-        String(user.id),
-        JSON.stringify(productIds),
-        totalPaise,
-        payment.order_id,
-        JSON.stringify(orderItems)
-      ]
-    );
-
-    await admin(
-      `NEW MINI APP ORDER\nOrder: ${orderId}\nCustomer: ${user.id}\nAmount: ₹${formatRupees(totalPaise)}`
-    );
-
+    // Wallet covers part or none of the order.
     res.json({
       orderId,
       agOrderId: payment.order_id,
       payUrl: payment.pay_url,
       upiLink: payment.upi_link,
       qrPngUrl: payment.qr_png_url,
-      amount: payment.amount,
-      validSeconds: payment.valid_seconds
+      amount: formatRupees(upiAmount),
+      totalAmount: formatRupees(totalPaise),
+      walletUsed: formatRupees(walletUsed),
+      paymentMethod: walletUsed > 0 ? 'upi_wallet' : 'upi',
+      validSeconds: payment.valid_seconds,
+      status: 'PENDING'
     });
   } catch (error) {
     console.error('Create order error:', error);
@@ -2156,6 +2364,13 @@ app.post('/api/check-payment', async (req, res) => {
       });
     }
 
+    if (order.status === 'expired') {
+      return res.json({
+        status: 'EXPIRED',
+        message: 'Payment expired. Any wallet contribution has been returned.'
+      });
+    }
+
     if (order.fulfillment_status === 'manual_review') {
       return res.json({
         status: 'MANUAL_REVIEW',
@@ -2170,6 +2385,13 @@ app.post('/api/check-payment', async (req, res) => {
       });
     }
 
+    if (order.fulfillment_status === 'supplier_failed') {
+      return res.json({
+        status: 'SUPPLIER_FAILED',
+        message: 'Supplier could not fulfil the order.'
+      });
+    }
+
     const verification = await verifyAGPayment(agOrderId);
     const data = verification.data || {};
     const status = String(data.status || '').toUpperCase();
@@ -2177,9 +2399,10 @@ app.post('/api/check-payment', async (req, res) => {
     if (status === 'PAID') {
       const receivedPaise = rupeesToPaise(data.amount);
 
+      // AG amount must match the UPI remainder, not the full order total.
       if (receivedPaise !== Number(order.amount_paise)) {
         await admin(
-          `MINI APP PAYMENT AMOUNT MISMATCH\nOrder: ${order.id}\nAG order: ${agOrderId}`
+          `MINI APP PAYMENT AMOUNT MISMATCH\nOrder: ${order.id}\nAG order: ${agOrderId}\nExpected: ₹${formatRupees(order.amount_paise)}\nReceived: ₹${formatRupees(receivedPaise)}`
         );
 
         return res.status(400).json({
@@ -2221,18 +2444,17 @@ app.post('/api/check-payment', async (req, res) => {
     }
 
     if (status === 'EXPIRED') {
-      await pool.query(
-        `UPDATE orders SET status='expired'
-         WHERE ag_order_id=$1 AND status='pending'`,
-        [agOrderId]
-      );
+      await refundExpiredHybridOrder(agOrderId);
+
+      return res.json({
+        status: 'EXPIRED',
+        message: 'Payment expired. Any wallet contribution has been returned.'
+      });
     }
 
     res.json({
       status: status || 'PENDING',
-      message: status === 'EXPIRED'
-        ? 'Payment expired.'
-        : 'Waiting for payment.'
+      message: 'Waiting for payment.'
     });
   } catch (error) {
     console.error('Payment verification error:', error);
@@ -2339,6 +2561,7 @@ app.post('/ag-webhook', async (req, res) => {
           if (orderResult.rowCount) {
             const order = orderResult.rows[0];
 
+            // For hybrid orders, amount_paise is the UPI remainder.
             if (receivedPaise === Number(order.amount_paise)) {
               await fulfil(
                 agOrderId,
@@ -2347,7 +2570,7 @@ app.post('/ag-webhook', async (req, res) => {
               );
             } else {
               await admin(
-                `PRODUCT PAYMENT AMOUNT MISMATCH\nOrder: ${order.id}\nAG order: ${agOrderId}`
+                `PRODUCT PAYMENT AMOUNT MISMATCH\nOrder: ${order.id}\nAG order: ${agOrderId}\nExpected: ₹${formatRupees(order.amount_paise)}\nReceived: ₹${formatRupees(receivedPaise)}`
               );
             }
           }
@@ -2617,6 +2840,7 @@ app.post('/telegram-webhook', async (req, res) => {
     if (input === '📄 All Orders') {
       const result = await pool.query(
         `SELECT id, product_id, order_items, amount_paise,
+                order_total_paise, wallet_used_paise,
                 status, fulfillment_status, created_at
          FROM orders
          WHERE telegram_id=$1
@@ -2659,10 +2883,13 @@ app.post('/telegram-webhook', async (req, res) => {
           );
         }
 
+        const total = order.order_total_paise ?? order.amount_paise;
+
         return (
           `${index + 1}. ${names.join(', ')}\n` +
           `Order: ${order.id}\n` +
-          `Amount: ₹${formatRupees(order.amount_paise)}\n` +
+          `Total: ₹${formatRupees(total)}\n` +
+          `Wallet used: ₹${formatRupees(order.wallet_used_paise || 0)}\n` +
           `Status: ${(order.fulfillment_status || order.status).toUpperCase()}`
         );
       }).join('\n\n');
