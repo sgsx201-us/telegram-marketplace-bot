@@ -422,6 +422,7 @@ function getSupplierDuration(supplierProduct, durationId) {
   ) || null;
 }
 
+
 async function getLiveProducts() {
   let catalog;
 
@@ -434,8 +435,8 @@ async function getLiveProducts() {
       ...item,
       plans: (item.plans || []).map(plan => ({
         ...plan,
-        stock: 0,
-        available: false
+        stock: null,
+        available: true
       }))
     }));
   }
@@ -454,20 +455,18 @@ async function getLiveProducts() {
           plan.duration_id
         );
 
-        const stock = Math.max(
-          0,
-          Number(supplierDuration?.stock || 0)
-        );
-
         return {
           ...plan,
-          stock,
-          available: Boolean(supplierDuration && stock > 0)
+          stock: supplierDuration
+            ? Number(supplierDuration.stock || 0)
+            : null,
+          available: Boolean(supplierDuration)
         };
       })
     };
   });
 }
+
 
 async function getPlanAvailability(item, plan) {
   const catalog = await getArpanCatalog();
