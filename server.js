@@ -20,6 +20,7 @@ const {
 } = process.env;
 
 const ADMIN_ID = process.env.ADMIN_CHAT_ID || process.env.ADMIN_ID;
+const ARPAN_URL = 'https://arpanxlive.site/api/reseller_v1.php';
 
 const pool = DATABASE_URL
   ? new pg.Pool({
@@ -38,41 +39,120 @@ const inventory = JSON.parse(
   fs.readFileSync(path.join(dir, 'inventory.json'), 'utf8')
 );
 
-// Store categories
 const STORE_CATEGORIES = [
-  {
-    id: 'android_non_root',
-    label: '📱 Android Non Root',
-    value: 'Android Non Root'
-  },
-  {
-    id: 'android_root',
-    label: '🔓 Android Root',
-    value: 'Android Root'
-  },
-  {
-    id: 'ios',
-    label: '🍎 iOS',
-    value: 'iOS'
-  },
-  {
-    id: 'pc',
-    label: '💻 PC',
-    value: 'PC'
-  }
+  { id: 'android_non_root', label: '📱 Android Non Root', value: 'Android Non Root' },
+  { id: 'android_root', label: '🔓 Android Root', value: 'Android Root' },
+  { id: 'ios', label: '🍎 iOS', value: 'iOS' },
+  { id: 'pc', label: '💻 PC', value: 'PC' }
 ];
 
-// Wallet deposit limits
 const MIN_WALLET_DEPOSIT = 10;
 const MAX_WALLET_DEPOSIT = 50000;
 
-// Track the latest main menu for each chat
 const trackedMenuMessages = new Map();
 
+let arpanCatalogCache = null;
+let arpanCatalogCacheTime = 0;
+const ARPAN_CACHE_MS = 20000;
 
-// Telegram helper with colourful styling and automatic main-menu cleanup
+// --------------------------------------------------
+// GENERAL HELPERS
+// --------------------------------------------------
+
+function formatRupees(paise) {
+  return (Number(paise || 0) / 100).toFixed(2);
+}
+
+function rupeesToPaise(value) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount <= 0) return 0;
+  return Math.round(amount * 100);
+}
+
+function getCallbackUrl() {
+  if (!PUBLIC_BASE_URL) {
+    throw new Error('PUBLIC_BASE_URL is missing.');
+  }
+
+  return `${PUBLIC_BASE_URL.replace(/\/$/, '')}/ag-webhook`;
+}
+
+function unwrapApiResult(result) {
+  let value = result;
+
+  for (let i = 0; i < 4; i++) {
+    if (!value || typeof value !== 'object') break;
+
+    if (value.attributes && typeof value.attributes === 'object') {
+      value = value.attributes;
+      continue;
+    }
+
+    if (value.data && typeof value.data === 'object' && !Array.isArray(value.data)) {
+      value = value.data;
+      continue;
+    }
+
+    break;
+  }
+
+  return value;
+}
+
+function getProductCategories(item) {
+  return Array.isArray(item.categories)
+    ? item.categories
+    : [item.category];
+}
+
+function findProduct(productId) {
+  return products.find(
+    item => item.id === String(productId) && item.active
+  );
+}
+
+function findPlan(item, durationId) {
+  return item?.plans?.find(
+    plan => String(plan.duration_id) === String(durationId)
+  );
+}
+
+function getPlanPricePaise(plan) {
+  return rupeesToPaise(plan?.price_inr);
+}
+
+function getPlanSnapshot(item, plan, quantity = 1) {
+  return {
+    product_id: item.id,
+    product_name: item.name,
+    supplier_product_id: item.supplier_product_id,
+    duration_id: String(plan.duration_id),
+    duration: plan.duration,
+    quantity: Number(quantity),
+    unit_price_inr: Number(plan.price_inr),
+    supplier_price_inr: Number(plan.supplier_price_inr || 0)
+  };
+}
+
+async function admin(message) {
+  if (!ADMIN_ID) return;
+
+  try {
+    await tg('sendMessage', {
+      chat_id: ADMIN_ID,
+      text: message
+    });
+  } catch (error) {
+    console.error('Admin notification failed:', error.message);
+  }
+}
+
+// --------------------------------------------------
+// TELEGRAM
+// --------------------------------------------------
+
 async function tg(method, body) {
-  if (!BOT_TOKEN) throw new Error('BOT_TOKEN is missing');
+  if (!BOT_TOKEN) throw new Error('BOT_TOKEN is missing.');
 
   const styledBody = { ...body };
 
@@ -91,14 +171,15 @@ async function tg(method, body) {
     {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(styledBody)
+      body: JSON.stringify(styledBody),
+      signal: AbortSignal.timeout(20000)
     }
   );
 
   const data = await response.json();
 
   if (!data.ok) {
-    throw new Error(data.description || 'Telegram API error');
+    throw new Error(data.description || 'Telegram API error.');
   }
 
   const result = data.result;
@@ -128,15 +209,13 @@ async function tg(method, body) {
   return result;
 }
 
-
-// Delete the latest tracked main menu
 async function deleteTrackedMenu(chatId) {
-  const chatKey = String(chatId);
-  const messageId = trackedMenuMessages.get(chatKey);
+  const key = String(chatId);
+  const messageId = trackedMenuMessages.get(key);
 
   if (!messageId) return;
 
-  trackedMenuMessages.delete(chatKey);
+  trackedMenuMessages.delete(key);
 
   try {
     await tg('deleteMessage', {
@@ -148,7 +227,6 @@ async function deleteTrackedMenu(chatId) {
   }
 }
 
-// Delete an inline menu after a button is selected
 async function deleteSelectedMenu(chatId, messageId) {
   if (!chatId || !messageId) return;
 
@@ -158,22 +236,41 @@ async function deleteSelectedMenu(chatId, messageId) {
       message_id: messageId
     });
   } catch (error) {
-    console.log('Selected menu deletion failed:', error.message);
+    console.log('Inline menu deletion failed:', error.message);
   }
 }
 
-async function admin(message) {
-  if (ADMIN_ID) {
-    await tg('sendMessage', {
-      chat_id: ADMIN_ID,
-      text: message
-    });
-  }
+const MAIN_MENU = {
+  keyboard: [
+    [{ text: '🛍️ Product Store' }],
+    [{ text: '👤 My Profile' }, { text: '💳 My Balance' }],
+    [{ text: '📄 All Orders' }, { text: '🎁 Referral' }],
+    [{ text: '🧾 Check Payment' }],
+    [{ text: '🎬 Tutorial' }, { text: '📞 Support' }]
+  ],
+  resize_keyboard: true,
+  is_persistent: true
+};
+
+async function sendMenu(chatId, user) {
+  const name = user?.first_name || 'Customer';
+
+  await tg('sendMessage', {
+    chat_id: chatId,
+    text:
+      `➡️ Welcome ${name}!\n\n` +
+      `🚀 Everything you need, all in one place.\n\n` +
+      `👇 Select any option below to get started!`,
+    reply_markup: MAIN_MENU
+  });
 }
 
-// AG Gateway: create a UPI payment
+// --------------------------------------------------
+// AG PAYMENT GATEWAY
+// --------------------------------------------------
+
 async function createAGPayment(amount, callbackUrl) {
-  if (!AG_API_KEY) throw new Error('AG_API_KEY is missing');
+  if (!AG_API_KEY) throw new Error('AG_API_KEY is missing.');
 
   const form = new URLSearchParams({
     api_key: AG_API_KEY,
@@ -188,22 +285,22 @@ async function createAGPayment(amount, callbackUrl) {
       headers: {
         'content-type': 'application/x-www-form-urlencoded'
       },
-      body: form
+      body: form,
+      signal: AbortSignal.timeout(20000)
     }
   );
 
   const result = await response.json();
 
   if (!response.ok || result.status !== 'success' || !result.data?.order_id) {
-    throw new Error(result.message || 'AG payment creation failed');
+    throw new Error(result.message || 'AG payment creation failed.');
   }
 
   return result.data;
 }
 
-// AG Gateway: verify payment status
 async function verifyAGPayment(orderId) {
-  if (!AG_API_KEY) throw new Error('AG_API_KEY is missing');
+  if (!AG_API_KEY) throw new Error('AG_API_KEY is missing.');
 
   const form = new URLSearchParams({
     api_key: AG_API_KEY,
@@ -217,32 +314,248 @@ async function verifyAGPayment(orderId) {
       headers: {
         'content-type': 'application/x-www-form-urlencoded'
       },
-      body: form
+      body: form,
+      signal: AbortSignal.timeout(20000)
     }
   );
 
   const result = await response.json();
 
   if (!response.ok) {
-    throw new Error(result.message || 'AG verification request failed');
+    throw new Error(result.message || 'AG verification failed.');
   }
 
   return result;
 }
 
-function getCallbackUrl() {
-  if (!PUBLIC_BASE_URL) {
-    throw new Error('PUBLIC_BASE_URL is missing');
+// --------------------------------------------------
+// ARPAN RESELLER API
+// --------------------------------------------------
+
+async function callArpan(fields) {
+  const apiKey = process.env.ARPAN_API_KEY;
+
+  if (!apiKey) {
+    throw new Error('ARPAN_API_KEY is missing in Railway Variables.');
   }
 
-  return `${PUBLIC_BASE_URL.replace(/\/$/, '')}/ag-webhook`;
+  const body = new URLSearchParams({
+    api_key: apiKey,
+    ...fields
+  });
+
+  const response = await fetch(ARPAN_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded'
+    },
+    body,
+    signal: AbortSignal.timeout(20000)
+  });
+
+  const text = await response.text();
+
+  let result;
+
+  try {
+    result = JSON.parse(text);
+  } catch {
+    const error = new Error('ARPAN returned an unreadable response.');
+    error.ambiguous = true;
+    throw error;
+  }
+
+  return {
+    httpStatus: response.status,
+    ok: response.ok,
+    raw: result,
+    data: unwrapApiResult(result)
+  };
 }
 
-function formatRupees(paise) {
-  return (Number(paise || 0) / 100).toFixed(2);
+async function getArpanCatalog(force = false) {
+  if (
+    !force &&
+    arpanCatalogCache &&
+    Date.now() - arpanCatalogCacheTime < ARPAN_CACHE_MS
+  ) {
+    return arpanCatalogCache;
+  }
+
+  const response = await callArpan({ action: 'products' });
+  const data = response.data;
+
+  const supplierProducts = Array.isArray(data)
+    ? data
+    : Array.isArray(data.products)
+      ? data.products
+      : Array.isArray(response.raw.products)
+        ? response.raw.products
+        : [];
+
+  if (!response.ok || !supplierProducts.length) {
+    throw new Error(
+      response.raw.message ||
+      data.message ||
+      'Could not retrieve the ARPAN product catalogue.'
+    );
+  }
+
+  arpanCatalogCache = supplierProducts;
+  arpanCatalogCacheTime = Date.now();
+
+  return supplierProducts;
 }
 
-// Initialize database
+function getSupplierProduct(catalog, supplierProductId) {
+  return catalog.find(item =>
+    String(item.product_id ?? item.id) === String(supplierProductId)
+  );
+}
+
+function getSupplierDuration(supplierProduct, durationId) {
+  const durations = supplierProduct?.durations;
+
+  if (!Array.isArray(durations)) return null;
+
+  return durations.find(item =>
+    String(item.duration_id ?? item.id) === String(durationId)
+  ) || null;
+}
+
+async function getLiveProducts() {
+  let catalog;
+
+  try {
+    catalog = await getArpanCatalog(true);
+  } catch (error) {
+    console.error('ARPAN catalogue unavailable:', error.message);
+
+    // Do not use old cached stock to allow purchases.
+    return products.map(item => ({
+      ...item,
+      plans: (item.plans || []).map(plan => ({
+        ...plan,
+        stock: 0,
+        available: false
+      }))
+    }));
+  }
+
+  return products.map(item => {
+    const supplierProduct = getSupplierProduct(
+      catalog,
+      item.supplier_product_id
+    );
+
+    return {
+      ...item,
+      plans: (item.plans || []).map(plan => {
+        const supplierDuration = getSupplierDuration(
+          supplierProduct,
+          plan.duration_id
+        );
+
+        const stock = Math.max(
+          0,
+          Number(supplierDuration?.stock || 0)
+        );
+
+        return {
+          ...plan,
+          stock,
+          available: Boolean(supplierDuration && stock > 0)
+        };
+      })
+    };
+  });
+}
+
+async function getPlanAvailability(item, plan) {
+  const catalog = await getArpanCatalog();
+  const supplierProduct = getSupplierProduct(
+    catalog,
+    item.supplier_product_id
+  );
+
+  const supplierDuration = getSupplierDuration(
+    supplierProduct,
+    plan.duration_id
+  );
+
+  const stock = Math.max(
+    0,
+    Number(supplierDuration?.stock || 0)
+  );
+
+  return {
+    available: Boolean(supplierDuration && stock > 0),
+    stock,
+    supplierProduct,
+    supplierDuration
+  };
+}
+
+async function buyFromArpan(orderItem) {
+  const quantity = Number(orderItem.quantity || 1);
+
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) {
+    throw new Error('Invalid ARPAN purchase quantity.');
+  }
+
+  const response = await callArpan({
+    action: 'buy',
+    duration_id: String(orderItem.duration_id),
+    quantity: String(quantity)
+  });
+
+  const data = response.data;
+  const raw = response.raw;
+
+  const success =
+    response.ok &&
+    (
+      String(raw.status || data.status || '').toLowerCase() === 'success' ||
+      Boolean(data.key) ||
+      (Array.isArray(data.keys) && data.keys.length > 0)
+    );
+
+  if (success) {
+    const keys = Array.isArray(data.keys)
+      ? data.keys
+      : data.key
+        ? [data.key]
+        : [];
+
+    return {
+      keys,
+      unit_price: data.unit_price ?? null,
+      total_price: data.total_price ?? null,
+      balance: data.balance ?? null,
+      raw: data
+    };
+  }
+
+  const code = Number(raw.code || data.code || response.httpStatus);
+  const message = raw.message || data.message || 'ARPAN purchase failed.';
+
+  // These documented responses mean the supplier rejected the purchase.
+  if ([402, 404, 409].includes(code) || [402, 404, 409].includes(response.httpStatus)) {
+    const error = new Error(message);
+    error.definiteFailure = true;
+    throw error;
+  }
+
+  // An unknown response may mean the supplier processed the order.
+  const error = new Error(message);
+  error.ambiguous = true;
+  throw error;
+}
+
+// --------------------------------------------------
+// DATABASE
+// --------------------------------------------------
+
 async function initDb() {
   if (!pool) {
     console.warn('DATABASE_URL is missing. Database features are disabled.');
@@ -267,6 +580,11 @@ async function initDb() {
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS ag_order_id TEXT;
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_utr TEXT;
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS order_items JSONB;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS fulfillment_status TEXT DEFAULT 'not_started';
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS fulfillment_error TEXT;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS fulfillment_started_at TIMESTAMPTZ;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS supplier_result JSONB;
 
     CREATE INDEX IF NOT EXISTS orders_telegram_id_idx
     ON orders(telegram_id);
@@ -321,7 +639,6 @@ async function initDb() {
     );
   `);
 
-  // Import inventory without duplicating existing stock
   for (const item of inventory) {
     await pool.query(
       `INSERT INTO stock(product_id, delivery_code)
@@ -334,7 +651,10 @@ async function initDb() {
   console.log('Database initialized.');
 }
 
-// Get or create a wallet
+// --------------------------------------------------
+// WALLET
+// --------------------------------------------------
+
 async function getWalletBalance(telegramId) {
   if (!pool) throw new Error('Database is not configured.');
 
@@ -353,7 +673,6 @@ async function getWalletBalance(telegramId) {
   return Number(result.rows[0].balance_paise);
 }
 
-// Credit a deposit once, inside a database transaction
 async function creditWalletDeposit(agOrderId, paymentId) {
   if (!pool) throw new Error('Database is not configured.');
 
@@ -415,7 +734,8 @@ async function creditWalletDeposit(agOrderId, paymentId) {
     await client.query(
       `INSERT INTO wallet_transactions
        (telegram_id, type, amount_paise, reference, description)
-       VALUES($1, 'credit', $2, $3, $4)`,
+       VALUES($1, 'credit', $2, $3, $4)
+       ON CONFLICT(reference) DO NOTHING`,
       [
         telegramId,
         deposit.amount_paise,
@@ -454,14 +774,12 @@ async function creditWalletDeposit(agOrderId, paymentId) {
   }
 }
 
-// Create a wallet deposit
 async function createWalletDeposit(chatId, telegramId, amountRupees) {
   if (!pool) throw new Error('Database is not configured.');
 
   const amount = Number(amountRupees);
 
   if (
-    !Number.isFinite(amount) ||
     !Number.isInteger(amount) ||
     amount < MIN_WALLET_DEPOSIT ||
     amount > MAX_WALLET_DEPOSIT
@@ -471,34 +789,20 @@ async function createWalletDeposit(chatId, telegramId, amountRupees) {
     );
   }
 
-  const amountPaise = amount * 100;
-
-  const payment = await createAGPayment(
-    amount,
-    getCallbackUrl()
-  );
-
+  const payment = await createAGPayment(amount, getCallbackUrl());
   const depositId = crypto.randomUUID();
 
   await pool.query(
     `INSERT INTO wallet_deposits
      (id, telegram_id, ag_order_id, amount_paise)
      VALUES($1, $2, $3, $4)`,
-    [
-      depositId,
-      String(telegramId),
-      payment.order_id,
-      amountPaise
-    ]
+    [depositId, String(telegramId), payment.order_id, amount * 100]
   );
 
   const buttons = [];
 
   if (payment.pay_url) {
-    buttons.push([{
-      text: '💳 PAY NOW',
-      url: payment.pay_url
-    }]);
+    buttons.push([{ text: '💳 PAY NOW', url: payment.pay_url }]);
   }
 
   buttons.push([{
@@ -512,37 +816,29 @@ async function createWalletDeposit(chatId, telegramId, amountRupees) {
       `💰 WALLET DEPOSIT CREATED\n\n` +
       `Amount: ₹${amount.toFixed(2)}\n` +
       `AG Order: ${payment.order_id}\n\n` +
-      `1. Press PAY NOW to complete your UPI payment.\n` +
-      `2. After payment, press CHECK DEPOSIT.\n\n` +
-      `Your wallet will be credited only after payment verification.`,
+      `Complete your UPI payment, then press CHECK DEPOSIT.`,
     reply_markup: { inline_keyboard: buttons }
   });
 
   await admin(
-    `NEW WALLET DEPOSIT CREATED\nCustomer: ${telegramId}\nAmount: ₹${amount.toFixed(2)}\nAG Order: ${payment.order_id}`
+    `NEW WALLET DEPOSIT\nCustomer: ${telegramId}\nAmount: ₹${amount.toFixed(2)}\nAG Order: ${payment.order_id}`
   );
 }
 
-// Verify a wallet deposit
 async function checkWalletDeposit(agOrderId, telegramId) {
-  if (!pool) throw new Error('Database is not configured.');
-
   const result = await pool.query(
     `SELECT * FROM wallet_deposits
      WHERE ag_order_id=$1 AND telegram_id=$2`,
     [agOrderId, String(telegramId)]
   );
 
-  if (!result.rowCount) {
-    throw new Error('Wallet deposit not found.');
-  }
+  if (!result.rowCount) throw new Error('Wallet deposit not found.');
 
   const deposit = result.rows[0];
 
   if (deposit.status === 'credited') {
     const balance = await getWalletBalance(telegramId);
-
-    return `✅ This deposit is already credited.\n\nWallet balance: ₹${formatRupees(balance)}`;
+    return `✅ Deposit already credited.\n\nWallet balance: ₹${formatRupees(balance)}`;
   }
 
   if (deposit.status !== 'pending') {
@@ -554,17 +850,14 @@ async function checkWalletDeposit(agOrderId, telegramId) {
   const status = String(data.status || '').toUpperCase();
 
   if (status === 'PAID') {
-    const receivedPaise = Math.round(Number(data.amount) * 100);
+    const receivedPaise = rupeesToPaise(data.amount);
 
-    if (
-      !Number.isSafeInteger(receivedPaise) ||
-      receivedPaise !== Number(deposit.amount_paise)
-    ) {
+    if (receivedPaise !== Number(deposit.amount_paise)) {
       await admin(
-        `WALLET DEPOSIT AMOUNT MISMATCH\nCustomer: ${telegramId}\nAG Order: ${agOrderId}\nExpected: ₹${formatRupees(deposit.amount_paise)}\nReceived: ${data.amount}`
+        `WALLET AMOUNT MISMATCH\nCustomer: ${telegramId}\nAG Order: ${agOrderId}`
       );
 
-      return '⚠️ Payment amount does not match. Your wallet has not been credited. Please contact support.';
+      return '⚠️ Payment amount does not match. Contact support.';
     }
 
     const credited = await creditWalletDeposit(
@@ -572,9 +865,7 @@ async function checkWalletDeposit(agOrderId, telegramId) {
       data.transaction_id || agOrderId
     );
 
-    if (!credited) {
-      return '⚠️ Deposit could not be credited. Please contact support.';
-    }
+    if (!credited) return '⚠️ Could not credit deposit. Contact support.';
 
     if (!credited.alreadyCredited) {
       await tg('sendMessage', {
@@ -586,31 +877,27 @@ async function checkWalletDeposit(agOrderId, telegramId) {
       });
 
       await admin(
-        `WALLET DEPOSIT SUCCESSFUL\nCustomer: ${telegramId}\nAdded: ₹${formatRupees(credited.amountPaise)}\nNew balance: ₹${formatRupees(credited.balancePaise)}\nAG Order: ${agOrderId}`
+        `WALLET CREDITED\nCustomer: ${telegramId}\nAdded: ₹${formatRupees(credited.amountPaise)}\nBalance: ₹${formatRupees(credited.balancePaise)}`
       );
     }
 
-    return `✅ Payment verified!\n\nWallet balance: ₹${formatRupees(credited.balancePaise)}`;
+    return `✅ Payment verified.\nWallet balance: ₹${formatRupees(credited.balancePaise)}`;
   }
 
   if (status === 'EXPIRED') {
     await pool.query(
-      `UPDATE wallet_deposits
-       SET status='expired'
+      `UPDATE wallet_deposits SET status='expired'
        WHERE ag_order_id=$1 AND status='pending'`,
       [agOrderId]
     );
 
-    return '⌛ Deposit payment expired. Please create a new deposit.';
+    return '⌛ Deposit expired. Please create a new deposit.';
   }
 
-  return '⏳ Payment is still pending. Please try again shortly.';
+  return '⏳ Payment is still pending.';
 }
 
-// Wallet transaction history
 async function showWalletHistory(chatId, telegramId) {
-  if (!pool) throw new Error('Database is not configured.');
-
   const result = await pool.query(
     `SELECT type, amount_paise, description, created_at
      FROM wallet_transactions
@@ -626,21 +913,18 @@ async function showWalletHistory(chatId, telegramId) {
       text: '📜 You do not have any wallet transactions yet.',
       reply_markup: MAIN_MENU
     });
-
     return;
   }
 
   const lines = result.rows.map((item, index) => {
     const sign = item.type === 'credit' ? '+' : '-';
-
     const date = new Date(item.created_at).toLocaleString('en-IN', {
       timeZone: 'Asia/Kolkata'
     });
 
     return (
       `${index + 1}. ${item.type.toUpperCase()} ${sign}₹${formatRupees(item.amount_paise)}\n` +
-      `${item.description || 'Wallet transaction'}\n` +
-      `${date}`
+      `${item.description || 'Wallet transaction'}\n${date}`
     );
   });
 
@@ -651,50 +935,101 @@ async function showWalletHistory(chatId, telegramId) {
   });
 }
 
-// Deliver products in an existing UPI order
-async function fulfil(agOrderId, paymentId, utr = '') {
-  if (!pool) throw new Error('Database is not configured');
+// --------------------------------------------------
+// ORDER FULFILMENT
+// --------------------------------------------------
 
+async function refundWalletOrder(orderId, telegramId, amountPaise, reason) {
   const client = await pool.connect();
-  let committed = false;
 
   try {
     await client.query('BEGIN');
 
-    const result = await client.query(
-      'SELECT * FROM orders WHERE ag_order_id=$1 FOR UPDATE',
-      [agOrderId]
+    const reference = `refund:${orderId}`;
+
+    const existing = await client.query(
+      'SELECT id FROM wallet_transactions WHERE reference=$1',
+      [reference]
     );
 
-    if (!result.rowCount) {
-      await client.query('ROLLBACK');
+    if (existing.rowCount) {
+      await client.query('COMMIT');
       return;
     }
 
-    const order = result.rows[0];
+    await client.query(
+      `INSERT INTO wallets(telegram_id, balance_paise)
+       VALUES($1, 0)
+       ON CONFLICT(telegram_id) DO NOTHING`,
+      [String(telegramId)]
+    );
 
-    if (['paid', 'paid_out_of_stock'].includes(order.status)) {
+    await client.query(
+      `UPDATE wallets
+       SET balance_paise=balance_paise+$1,
+           updated_at=NOW()
+       WHERE telegram_id=$2`,
+      [amountPaise, String(telegramId)]
+    );
+
+    await client.query(
+      `INSERT INTO wallet_transactions
+       (telegram_id, type, amount_paise, reference, description)
+       VALUES($1, 'credit', $2, $3, $4)`,
+      [
+        String(telegramId),
+        amountPaise,
+        reference,
+        `Refund: ${reason}`
+      ]
+    );
+
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function fulfilLegacyStockOrder(order) {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const locked = await client.query(
+      'SELECT * FROM orders WHERE id=$1 FOR UPDATE',
+      [order.id]
+    );
+
+    if (!locked.rowCount) {
+      await client.query('ROLLBACK');
+      return { status: 'not_found' };
+    }
+
+    const current = locked.rows[0];
+
+    if (current.status === 'paid') {
       await client.query('COMMIT');
-      committed = true;
-      return;
+      return { status: 'paid' };
     }
 
     let productIds;
 
     try {
-      productIds = JSON.parse(order.product_id);
+      productIds = JSON.parse(current.product_id);
     } catch {
-      productIds = [order.product_id];
+      productIds = [current.product_id];
     }
 
-    if (!Array.isArray(productIds)) {
-      productIds = [productIds];
-    }
+    if (!Array.isArray(productIds)) productIds = [productIds];
 
     const deliveries = [];
 
     for (const productId of productIds) {
-      const stockResult = await client.query(
+      const stock = await client.query(
         `SELECT id, delivery_code
          FROM stock
          WHERE product_id=$1 AND used=FALSE
@@ -704,305 +1039,348 @@ async function fulfil(agOrderId, paymentId, utr = '') {
         [productId]
       );
 
-      if (!stockResult.rowCount) {
+      if (!stock.rowCount) {
         await client.query(
           `UPDATE orders
            SET status='paid_out_of_stock',
-               payment_id=$1,
-               payment_utr=$2
-           WHERE id=$3`,
-          [paymentId, utr, order.id]
+               fulfillment_status='manual_review'
+           WHERE id=$1`,
+          [current.id]
         );
 
         await client.query('COMMIT');
-        committed = true;
 
         await admin(
-          `PAYMENT RECEIVED — OUT OF STOCK\nOrder: ${order.id}\nAG order: ${agOrderId}`
+          `LEGACY ORDER PAID BUT OUT OF STOCK\nOrder: ${current.id}\nCustomer: ${current.telegram_id}`
         );
 
-        return;
+        return { status: 'paid_out_of_stock' };
       }
 
-      deliveries.push({
-        stockId: stockResult.rows[0].id,
-        code: stockResult.rows[0].delivery_code
-      });
+      deliveries.push(stock.rows[0]);
     }
 
     for (const item of deliveries) {
       await client.query(
         `UPDATE stock SET used=TRUE, order_id=$1 WHERE id=$2`,
-        [order.id, item.stockId]
+        [current.id, item.id]
       );
     }
 
     await client.query(
       `UPDATE orders
        SET status='paid',
-           payment_id=$1,
-           payment_utr=$2,
+           fulfillment_status='delivered',
            delivered_at=NOW()
-       WHERE id=$3`,
-      [paymentId, utr, order.id]
+       WHERE id=$1`,
+      [current.id]
     );
 
     await client.query('COMMIT');
-    committed = true;
 
     const deliveryText = deliveries
-      .map((item, index) => `${index + 1}. ${item.code}`)
+      .map((item, index) => `${index + 1}. ${item.delivery_code}`)
       .join('\n');
 
     await tg('sendMessage', {
-      chat_id: order.telegram_id,
+      chat_id: current.telegram_id,
       text:
-        `✅ Payment verified!\n\nYour digital product:\n\n${deliveryText}\n\nOrder: ${order.id}`
+        `✅ PAYMENT VERIFIED!\n\n` +
+        `Your digital product:\n\n${deliveryText}\n\n` +
+        `Order: ${current.id}`
     });
 
     await admin(
-      `NEW PAID ORDER\nOrder: ${order.id}\nProducts: ${order.product_id}\nAmount: ₹${formatRupees(order.amount_paise)}\nAG Order: ${agOrderId}\nUTR: ${utr || 'Not provided'}\nDelivery sent.`
+      `LEGACY ORDER DELIVERED\nOrder: ${current.id}\nProducts: ${current.product_id}\nAmount: ₹${formatRupees(current.amount_paise)}`
     );
-  } catch (error) {
-    if (!committed) {
-      await client.query('ROLLBACK');
-    }
 
+    return { status: 'paid' };
+  } catch (error) {
+    await client.query('ROLLBACK');
     throw error;
   } finally {
     client.release();
   }
 }
 
-// Buy a product using wallet balance
-async function purchaseWithWallet(chatId, telegramId, productId) {
-  if (!pool) throw new Error('Database is not configured.');
-
-  const item = products.find(
-    p => p.id === productId && p.active
-  );
-
-  if (!item) throw new Error('Product unavailable.');
-
-  const amountPaise = Math.round(Number(item.price_inr) * 100);
-
-  if (!Number.isSafeInteger(amountPaise) || amountPaise <= 0) {
-    throw new Error('Invalid product price.');
-  }
-
-  const orderId = crypto.randomUUID();
+async function processArpanOrder(orderId, paymentId = '', utr = '') {
   const client = await pool.connect();
-
-  let deliveryCode;
-  let committed = false;
+  let order;
 
   try {
     await client.query('BEGIN');
 
-    await client.query(
-      `INSERT INTO wallets(telegram_id, balance_paise)
-       VALUES($1, 0)
-       ON CONFLICT(telegram_id) DO NOTHING`,
-      [String(telegramId)]
+    const result = await client.query(
+      'SELECT * FROM orders WHERE id=$1 FOR UPDATE',
+      [orderId]
     );
 
-    const walletResult = await client.query(
-      `SELECT balance_paise
-       FROM wallets
-       WHERE telegram_id=$1
-       FOR UPDATE`,
-      [String(telegramId)]
-    );
-
-    const balance = Number(walletResult.rows[0].balance_paise);
-
-    if (balance < amountPaise) {
+    if (!result.rowCount) {
       await client.query('ROLLBACK');
-
-      return {
-        insufficient: true,
-        balance,
-        required: amountPaise
-      };
+      return { status: 'not_found' };
     }
 
-    const stockResult = await client.query(
-      `SELECT id, delivery_code
-       FROM stock
-       WHERE product_id=$1 AND used=FALSE
-       ORDER BY id
-       LIMIT 1
-       FOR UPDATE SKIP LOCKED`,
-      [item.id]
-    );
+    order = result.rows[0];
 
-    if (!stockResult.rowCount) {
-      await client.query('ROLLBACK');
-      throw new Error('Out of stock.');
+    if (order.status === 'paid' && order.fulfillment_status === 'delivered') {
+      await client.query('COMMIT');
+      return { status: 'paid' };
     }
 
-    deliveryCode = stockResult.rows[0].delivery_code;
+    if (
+      ['processing', 'manual_review', 'supplier_failed'].includes(
+        order.fulfillment_status
+      )
+    ) {
+      await client.query('COMMIT');
+      return { status: order.fulfillment_status };
+    }
+
+    if (order.status === 'expired') {
+      await client.query('COMMIT');
+      return { status: 'expired' };
+    }
+
+    if (!order.order_items) {
+      await client.query('COMMIT');
+      return fulfilLegacyStockOrder(order);
+    }
 
     await client.query(
-      `UPDATE wallets
-       SET balance_paise=balance_paise-$1,
-           updated_at=NOW()
-       WHERE telegram_id=$2`,
-      [amountPaise, String(telegramId)]
-    );
-
-    await client.query(
-      `INSERT INTO orders
-       (id, telegram_id, product_id, amount_paise, status, payment_id, delivered_at)
-       VALUES($1, $2, $3, $4, 'paid', 'wallet', NOW())`,
-      [
-        orderId,
-        String(telegramId),
-        JSON.stringify([productId]),
-        amountPaise
-      ]
-    );
-
-    await client.query(
-      `UPDATE stock
-       SET used=TRUE, order_id=$1
-       WHERE id=$2`,
-      [orderId, stockResult.rows[0].id]
-    );
-
-    await client.query(
-      `INSERT INTO wallet_transactions
-       (telegram_id, type, amount_paise, reference, description)
-       VALUES($1, 'debit', $2, $3, $4)`,
-      [
-        String(telegramId),
-        amountPaise,
-        `purchase:${orderId}`,
-        `Purchase: ${item.name}`
-      ]
+      `UPDATE orders
+       SET fulfillment_status='processing',
+           fulfillment_started_at=NOW(),
+           payment_id=COALESCE($1, payment_id),
+           payment_utr=COALESCE($2, payment_utr)
+       WHERE id=$3`,
+      [paymentId || null, utr || null, orderId]
     );
 
     await client.query('COMMIT');
-    committed = true;
   } catch (error) {
-    if (!committed) {
-      await client.query('ROLLBACK');
-    }
-
+    await client.query('ROLLBACK');
     throw error;
   } finally {
     client.release();
   }
 
-  const newBalance = await getWalletBalance(telegramId);
+  const items = Array.isArray(order.order_items)
+    ? order.order_items
+    : JSON.parse(order.order_items);
+
+  const results = [];
+  let successfulQuantity = 0;
 
   try {
-    await tg('sendMessage', {
-      chat_id: chatId,
-      text:
-        `✅ PURCHASE SUCCESSFUL!\n\n` +
-        `Product: ${item.name}\n` +
-        `Paid using wallet: ₹${formatRupees(amountPaise)}\n\n` +
-        `Your product:\n${deliveryCode}\n\n` +
-        `Order: ${orderId}\n` +
-        `Remaining wallet balance: ₹${formatRupees(newBalance)}`
-    });
-  } catch (error) {
+    for (const item of items) {
+      const purchased = await buyFromArpan(item);
+
+      successfulQuantity += purchased.keys.length;
+
+      results.push({
+        product_name: item.product_name,
+        duration: item.duration,
+        quantity: item.quantity,
+        keys: purchased.keys,
+        supplier: {
+          unit_price: purchased.unit_price,
+          total_price: purchased.total_price,
+          balance: purchased.balance
+        }
+      });
+
+      // Persist each successful supplier response immediately.
+      await pool.query(
+        `UPDATE orders
+         SET supplier_result=$1::jsonb
+         WHERE id=$2`,
+        [JSON.stringify(results), orderId]
+      );
+    }
+
+    const expectedQuantity = items.reduce(
+      (sum, item) => sum + Number(item.quantity || 1),
+      0
+    );
+
+    const deliveredQuantity = results.reduce(
+      (sum, item) => sum + item.keys.length,
+      0
+    );
+
+    if (deliveredQuantity !== expectedQuantity) {
+      await pool.query(
+        `UPDATE orders
+         SET status='paid',
+             fulfillment_status='manual_review',
+             fulfillment_error=$1,
+             supplier_result=$2::jsonb
+         WHERE id=$3`,
+        [
+          `Supplier returned ${deliveredQuantity} keys for ${expectedQuantity} requested.`,
+          JSON.stringify(results),
+          orderId
+        ]
+      );
+
+      await admin(
+        `ARPAN PARTIAL FULFILMENT — MANUAL REVIEW\nOrder: ${orderId}\nCustomer: ${order.telegram_id}\nReceived keys: ${deliveredQuantity}\nExpected keys: ${expectedQuantity}`
+      );
+
+      return { status: 'manual_review' };
+    }
+
+    const deliveryLines = [];
+
+    for (const item of results) {
+      for (const key of item.keys) {
+        deliveryLines.push(
+          `${item.product_name} — ${item.duration}\n${key}`
+        );
+      }
+    }
+
+    await pool.query(
+      `UPDATE orders
+       SET status='paid',
+           fulfillment_status='delivered',
+           supplier_result=$1::jsonb,
+           delivered_at=NOW(),
+           fulfillment_error=NULL
+       WHERE id=$2`,
+      [JSON.stringify(results), orderId]
+    );
+
+    try {
+      await tg('sendMessage', {
+        chat_id: order.telegram_id,
+        text:
+          `✅ PAYMENT VERIFIED!\n\n` +
+          `🎉 YOUR PRODUCT KEYS:\n\n` +
+          `${deliveryLines.map((line, index) => `${index + 1}. ${line}`).join('\n\n')}\n\n` +
+          `Order: ${orderId}`
+      });
+    } catch (error) {
+      await admin(
+        `DELIVERY MESSAGE FAILED\nOrder: ${orderId}\nCustomer: ${order.telegram_id}\nSupplier purchase succeeded. Check supplier_result in the database and contact the customer.`
+      );
+    }
+
     await admin(
-      `WALLET ORDER DELIVERY MESSAGE FAILED\nOrder: ${orderId}\nCustomer: ${telegramId}\nProduct: ${item.name}\nDelivery code: ${deliveryCode}\nPlease contact the customer.`
+      `ARPAN ORDER DELIVERED\nOrder: ${orderId}\nCustomer: ${order.telegram_id}\nAmount: ₹${formatRupees(order.amount_paise)}\nKeys delivered: ${deliveredQuantity}`
     );
 
-    throw new Error(
-      'Payment was successful, but Telegram delivery failed. Contact support with order ID: ' + orderId
+    return { status: 'paid' };
+  } catch (error) {
+    const ambiguous = Boolean(error.ambiguous);
+    const definiteFailure = Boolean(error.definiteFailure);
+
+    const newStatus = definiteFailure && successfulQuantity === 0
+      ? 'supplier_failed'
+      : 'manual_review';
+
+    await pool.query(
+      `UPDATE orders
+       SET status='paid',
+           fulfillment_status=$1,
+           fulfillment_error=$2,
+           supplier_result=$3::jsonb
+       WHERE id=$4`,
+      [
+        newStatus,
+        error.message,
+        JSON.stringify(results),
+        orderId
+      ]
     );
+
+    // Refund wallet purchases only when ARPAN definitely rejected
+    // the purchase and no keys were purchased.
+    if (
+      definiteFailure &&
+      successfulQuantity === 0 &&
+      order.payment_id === 'wallet'
+    ) {
+      await refundWalletOrder(
+        order.id,
+        order.telegram_id,
+        Number(order.amount_paise),
+        error.message
+      );
+
+      await pool.query(
+        `UPDATE orders
+         SET status='supplier_failed',
+             fulfillment_status='supplier_failed'
+         WHERE id=$1`,
+        [orderId]
+      );
+
+      await tg('sendMessage', {
+        chat_id: order.telegram_id,
+        text:
+          `⚠️ Supplier could not fulfil your order.\n\n` +
+          `Your wallet payment has been refunded.\n` +
+          `Order: ${orderId}`
+      }).catch(() => {});
+
+      await admin(
+        `WALLET ORDER REFUNDED\nOrder: ${orderId}\nCustomer: ${order.telegram_id}\nReason: ${error.message}`
+      );
+
+      return { status: 'supplier_failed' };
+    }
+
+    await admin(
+      `ARPAN ORDER NEEDS MANUAL REVIEW\nOrder: ${orderId}\nCustomer: ${order.telegram_id}\nError: ${error.message}\nAmbiguous supplier result: ${ambiguous}\nSuccessful keys so far: ${successfulQuantity}\nDo not retry the supplier purchase blindly.`
+    );
+
+    return { status: 'manual_review' };
   }
+}
 
-  await admin(
-    `NEW WALLET PURCHASE\nOrder: ${orderId}\nCustomer: ${telegramId}\nProduct: ${item.name}\nAmount: ₹${formatRupees(amountPaise)}\nRemaining balance: ₹${formatRupees(newBalance)}`
+async function fulfil(agOrderId, paymentId, utr = '') {
+  const result = await pool.query(
+    'SELECT id FROM orders WHERE ag_order_id=$1',
+    [agOrderId]
   );
 
-  return { success: true };
+  if (!result.rowCount) return { status: 'not_found' };
+
+  return processArpanOrder(
+    result.rows[0].id,
+    paymentId,
+    utr
+  );
 }
 
-// Telegram chat menu
-const MAIN_MENU = {
-  keyboard: [
-    [{ text: '🛍️ Product Store' }],
-    [{ text: '👤 My Profile' }, { text: '💳 My Balance' }],
-    [{ text: '📄 All Orders' }, { text: '🎁 Referral' }],
-    [{ text: '🧾 Check Payment' }],
-    [{ text: '🎬 Tutorial' }, { text: '📞 Support' }]
-  ],
-  resize_keyboard: true,
-  is_persistent: true
-};
+// --------------------------------------------------
+// PRODUCT STORE AND TELEGRAM MENUS
+// --------------------------------------------------
 
-async function sendMenu(chatId, user) {
-  const name = user?.first_name || 'Customer';
-
-  await tg('sendMessage', {
-    chat_id: chatId,
-    text:
-      `🔥 FREE FIRE PANELS MARKETPLACE 🔥\n\n` +
-      `➡️ Welcome ${name}!\n\n` +
-      `🚀 Everything you need, all in one place.\n\n` +
-      `👇 Select any option below to get started!`,
-    reply_markup: MAIN_MENU
-  });
-}
-
-// Show all store categories
 async function showProducts(chatId) {
-  if (!pool) {
-    throw new Error('Database is not configured.');
-  }
-
   await tg('sendMessage', {
     chat_id: chatId,
-    text:
-      '🔥 FREE FIRE PANELS MARKETPLACE 🔥\n\n' +
-      '📱 Select your device category:',
+    text: '📱 Select your device category:',
     reply_markup: {
       inline_keyboard: [
-        [{
-          text: '📱 Android Non Root',
-          callback_data: 'category:android_non_root'
-        }],
-        [{
-          text: '🔓 Android Root',
-          callback_data: 'category:android_root'
-        }],
-        [{
-          text: '🍎 iOS',
-          callback_data: 'category:ios'
-        }],
-        [{
-          text: '💻 PC',
-          callback_data: 'category:pc'
-        }]
+        [{ text: '📱 Android Non Root', callback_data: 'category:android_non_root' }],
+        [{ text: '🔓 Android Root', callback_data: 'category:android_root' }],
+        [{ text: '🍎 iOS', callback_data: 'category:ios' }],
+        [{ text: '💻 PC', callback_data: 'category:pc' }]
       ]
     }
   });
 }
 
-// Show products in selected category
 async function showCategoryProducts(chatId, categoryId) {
-  const category = STORE_CATEGORIES.find(
-    item => item.id === categoryId
+  const category = STORE_CATEGORIES.find(item => item.id === categoryId);
+
+  if (!category) throw new Error('Invalid category.');
+
+  const available = products.filter(item =>
+    item.active && getProductCategories(item).includes(category.value)
   );
-
-  if (!category) {
-    throw new Error('Invalid category.');
-  }
-
-  // Support products in multiple categories
-  const available = products.filter(item => {
-    const categories = Array.isArray(item.categories)
-      ? item.categories
-      : [item.category];
-
-    return item.active && categories.includes(category.value);
-  });
 
   const keyboard = available.map(item => [{
     text: item.name,
@@ -1017,108 +1395,139 @@ async function showCategoryProducts(chatId, categoryId) {
   await tg('sendMessage', {
     chat_id: chatId,
     text: available.length
-      ? `${category.label}\n\n➡️ Select a Product to continue: 👇`
+      ? `${category.label}\n\n➡️ Select a product:`
       : `${category.label}\n\nNo products have been added yet.`,
-    reply_markup: {
-      inline_keyboard: keyboard
-    }
+    reply_markup: { inline_keyboard: keyboard }
   });
 }
 
-// Choose payment method for a product
 async function showPaymentMethods(chatId, productId) {
-  const item = products.find(
-    p => p.id === productId && p.active
-  );
+  const item = findProduct(productId);
 
-  if (!item) {
-    throw new Error('Product unavailable.');
+  if (!item) throw new Error('Product unavailable.');
+
+  if (!Array.isArray(item.plans) || !item.plans.length) {
+    throw new Error('No duration plans found for this product.');
   }
 
-  const price = Number(item.price_inr);
+  const catalog = await getArpanCatalog().catch(() => null);
 
-  if (!Number.isFinite(price) || price <= 0) {
+  const buttons = [];
+
+  for (const plan of item.plans) {
+    const supplierProduct = catalog
+      ? getSupplierProduct(catalog, item.supplier_product_id)
+      : null;
+
+    const supplierDuration = getSupplierDuration(
+      supplierProduct,
+      plan.duration_id
+    );
+
+    const stock = Math.max(0, Number(supplierDuration?.stock || 0));
+
+    buttons.push([{
+      text: stock > 0
+        ? `⏳ ${plan.duration} — ₹${Number(plan.price_inr).toFixed(2)}`
+        : `❌ ${plan.duration} — OUT OF STOCK`,
+      callback_data: `plan:${item.id}:${plan.duration_id}`
+    }]);
+  }
+
+  buttons.push([{
+    text: '⬅️ Back to Products',
+    callback_data: 'category:android_non_root'
+  }]);
+
+  await tg('sendMessage', {
+    chat_id: chatId,
+    text:
+      `📦 ${item.name}\n\n` +
+      `👇 SELECT YOUR DURATION:\n` +
+      `The current supplier stock is checked before checkout.`,
+    reply_markup: { inline_keyboard: buttons }
+  });
+}
+
+async function showPlanPaymentMethods(chatId, productId, durationId) {
+  const item = findProduct(productId);
+  const plan = findPlan(item, durationId);
+
+  if (!item || !plan) throw new Error('Selected plan is unavailable.');
+
+  const availability = await getPlanAvailability(item, plan);
+
+  if (!availability.available) {
     await tg('sendMessage', {
       chat_id: chatId,
-      text: `📦 ${item.name}\n\n⏳ This product is coming soon.`,
+      text:
+        `📦 ${item.name}\n` +
+        `⏳ ${plan.duration}\n\n` +
+        `❌ This plan is currently out of stock.\n` +
+        `Please check again later.`,
       reply_markup: {
         inline_keyboard: [[{
-          text: '⬅️ Back to Products',
-          callback_data: 'category:android_non_root'
+          text: '⬅️ Back to Plans',
+          callback_data: `buy:${item.id}`
         }]]
       }
     });
+
     return;
   }
 
-  const stock = await pool.query(
-    `SELECT id FROM stock
-     WHERE product_id=$1 AND used=FALSE
-     LIMIT 1`,
-    [item.id]
-  );
-
-  if (!stock.rowCount) {
-    await tg('sendMessage', {
-      chat_id: chatId,
-      text: `📦 ${item.name}\n\n⏳ Currently unavailable.`,
-      reply_markup: {
-        inline_keyboard: [[{
-          text: '⬅️ Back to Products',
-          callback_data: 'category:android_non_root'
-        }]]
-      }
-    });
-    return;
-  }
+  const price = Number(plan.price_inr);
 
   await tg('sendMessage', {
     chat_id: chatId,
     text:
       `📦 ${item.name}\n` +
-      `💰 Price: ₹${price.toFixed(2)}\n\n` +
+      `⏳ Duration: ${plan.duration}\n` +
+      `💰 Price: ₹${price.toFixed(2)}\n` +
+      `📦 Available stock: ${availability.stock}\n\n` +
       `Choose your payment method:`,
     reply_markup: {
       inline_keyboard: [
         [{
           text: '💳 Pay with UPI',
-          callback_data: `upibuy:${item.id}`
+          callback_data: `upibuy:${item.id}:${plan.duration_id}`
         }],
         [{
           text: '👛 Pay with Wallet',
-          callback_data: `walletbuy:${item.id}`
+          callback_data: `walletbuy:${item.id}:${plan.duration_id}`
+        }],
+        [{
+          text: '⬅️ Back to Plans',
+          callback_data: `buy:${item.id}`
         }]
       ]
     }
   });
 }
 
-// Create a normal UPI product order
-async function createChatOrder(chatId, telegramId, productId) {
+// --------------------------------------------------
+// CREATE UPI ORDER FOR TELEGRAM
+// --------------------------------------------------
+
+async function createChatOrder(chatId, telegramId, productId, durationId) {
   if (!pool || !PUBLIC_BASE_URL) {
     throw new Error('Payment system is not configured.');
   }
 
-  const item = products.find(
-    p => p.id === productId && p.active
-  );
+  const item = findProduct(productId);
+  const plan = findPlan(item, durationId);
 
-  if (!item) throw new Error('Product unavailable.');
+  if (!item || !plan) throw new Error('Selected plan is unavailable.');
 
-  const stock = await pool.query(
-    `SELECT id FROM stock
-     WHERE product_id=$1 AND used=FALSE
-     LIMIT 1`,
-    [item.id]
-  );
+  const availability = await getPlanAvailability(item, plan);
 
-  if (!stock.rowCount) throw new Error('Out of stock.');
+  if (!availability.available) throw new Error('This plan is out of stock.');
 
-  const amountPaise = Math.round(Number(item.price_inr) * 100);
+  const amountPaise = getPlanPricePaise(plan);
 
-  if (!Number.isSafeInteger(amountPaise) || amountPaise <= 0) {
-    throw new Error('Invalid product price.');
-  }
+  if (!amountPaise) throw new Error('Invalid product price.');
+
+  const orderItem = getPlanSnapshot(item, plan, 1);
 
   const payment = await createAGPayment(
     amountPaise / 100,
@@ -1129,24 +1538,22 @@ async function createChatOrder(chatId, telegramId, productId) {
 
   await pool.query(
     `INSERT INTO orders
-     (id, telegram_id, product_id, amount_paise, ag_order_id)
-     VALUES($1, $2, $3, $4, $5)`,
+     (id, telegram_id, product_id, amount_paise, ag_order_id, order_items)
+     VALUES($1, $2, $3, $4, $5, $6::jsonb)`,
     [
       orderId,
       String(telegramId),
-      JSON.stringify([productId]),
+      JSON.stringify([item.id]),
       amountPaise,
-      payment.order_id
+      payment.order_id,
+      JSON.stringify([orderItem])
     ]
   );
 
   const buttons = [];
 
   if (payment.pay_url) {
-    buttons.push([{
-      text: '💳 PAY NOW',
-      url: payment.pay_url
-    }]);
+    buttons.push([{ text: '💳 PAY NOW', url: payment.pay_url }]);
   }
 
   buttons.push([{
@@ -1159,22 +1566,150 @@ async function createChatOrder(chatId, telegramId, productId) {
     text:
       `🔥 ORDER CREATED!\n\n` +
       `📦 Product: ${item.name}\n` +
+      `⏳ Duration: ${plan.duration}\n` +
       `💰 Amount: ₹${formatRupees(amountPaise)}\n` +
       `🆔 Order: ${orderId}\n\n` +
-      `Complete your UPI payment using the button below.\n` +
-      `Then press Check Payment.`,
+      `Complete your UPI payment, then press CHECK PAYMENT.`,
     reply_markup: { inline_keyboard: buttons }
   });
 
   await admin(
-    `NEW ORDER CREATED\nOrder: ${orderId}\nCustomer: ${telegramId}\nProduct: ${item.name}\nAmount: ₹${formatRupees(amountPaise)}`
+    `NEW ARPAN ORDER CREATED\nOrder: ${orderId}\nCustomer: ${telegramId}\nProduct: ${item.name}\nDuration: ${plan.duration}\nAmount: ₹${formatRupees(amountPaise)}`
   );
 }
 
-// Check a normal UPI product payment
-async function checkChatPayment(agOrderId, telegramId) {
+// --------------------------------------------------
+// WALLET PRODUCT PURCHASE
+// --------------------------------------------------
+
+async function purchaseWithWallet(chatId, telegramId, productId, durationId) {
   if (!pool) throw new Error('Database is not configured.');
 
+  const item = findProduct(productId);
+  const plan = findPlan(item, durationId);
+
+  if (!item || !plan) throw new Error('Selected plan is unavailable.');
+
+  const availability = await getPlanAvailability(item, plan);
+
+  if (!availability.available) throw new Error('This plan is out of stock.');
+
+  const amountPaise = getPlanPricePaise(plan);
+
+  if (!amountPaise) throw new Error('Invalid product price.');
+
+  const orderId = crypto.randomUUID();
+  const orderItem = getPlanSnapshot(item, plan, 1);
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    await client.query(
+      `INSERT INTO wallets(telegram_id, balance_paise)
+       VALUES($1, 0)
+       ON CONFLICT(telegram_id) DO NOTHING`,
+      [String(telegramId)]
+    );
+
+    const wallet = await client.query(
+      `SELECT balance_paise FROM wallets
+       WHERE telegram_id=$1 FOR UPDATE`,
+      [String(telegramId)]
+    );
+
+    const balance = Number(wallet.rows[0].balance_paise);
+
+    if (balance < amountPaise) {
+      await client.query('ROLLBACK');
+
+      return {
+        insufficient: true,
+        balance,
+        required: amountPaise
+      };
+    }
+
+    await client.query(
+      `UPDATE wallets
+       SET balance_paise=balance_paise-$1,
+           updated_at=NOW()
+       WHERE telegram_id=$2`,
+      [amountPaise, String(telegramId)]
+    );
+
+    await client.query(
+      `INSERT INTO orders
+       (id, telegram_id, product_id, amount_paise, status, payment_id, order_items)
+       VALUES($1, $2, $3, $4, 'pending', 'wallet', $5::jsonb)`,
+      [
+        orderId,
+        String(telegramId),
+        JSON.stringify([item.id]),
+        amountPaise,
+        JSON.stringify([orderItem])
+      ]
+    );
+
+    await client.query(
+      `INSERT INTO wallet_transactions
+       (telegram_id, type, amount_paise, reference, description)
+       VALUES($1, 'debit', $2, $3, $4)`,
+      [
+        String(telegramId),
+        amountPaise,
+        `purchase:${orderId}`,
+        `Purchase: ${item.name} - ${plan.duration}`
+      ]
+    );
+
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  const result = await processArpanOrder(orderId, 'wallet');
+
+  if (result.status === 'paid') {
+    const newBalance = await getWalletBalance(telegramId);
+
+    await tg('sendMessage', {
+      chat_id: chatId,
+      text:
+        `✅ PURCHASE SUCCESSFUL!\n\n` +
+        `Product: ${item.name}\n` +
+        `Duration: ${plan.duration}\n` +
+        `Paid using wallet: ₹${formatRupees(amountPaise)}\n` +
+        `Remaining balance: ₹${formatRupees(newBalance)}\n` +
+        `Order: ${orderId}`
+    });
+  } else if (result.status === 'manual_review') {
+    await tg('sendMessage', {
+      chat_id: chatId,
+      text:
+        `⚠️ Your payment was received, but automatic delivery needs admin review.\n\n` +
+        `Please do not purchase again.\nOrder: ${orderId}`
+    });
+  } else if (result.status === 'supplier_failed') {
+    await tg('sendMessage', {
+      chat_id: chatId,
+      text:
+        `⚠️ Supplier could not complete your purchase.\n` +
+        `Your wallet has been refunded.\nOrder: ${orderId}`
+    });
+  }
+
+  return result;
+}
+
+// --------------------------------------------------
+// PAYMENT STATUS
+// --------------------------------------------------
+
+async function checkChatPayment(agOrderId, telegramId) {
   const result = await pool.query(
     `SELECT * FROM orders
      WHERE ag_order_id=$1 AND telegram_id=$2`,
@@ -1185,8 +1720,16 @@ async function checkChatPayment(agOrderId, telegramId) {
 
   const order = result.rows[0];
 
-  if (order.status === 'paid') {
-    return '✅ Payment already confirmed. Your product was delivered in this chat.';
+  if (order.status === 'paid' && order.fulfillment_status === 'delivered') {
+    return '✅ Payment confirmed. Your product was delivered.';
+  }
+
+  if (order.fulfillment_status === 'manual_review') {
+    return '⚠️ Your payment was received. Your order is being reviewed by the administrator.';
+  }
+
+  if (order.fulfillment_status === 'processing') {
+    return '⏳ Your order is being processed. Please wait.';
   }
 
   if (order.status === 'paid_out_of_stock') {
@@ -1198,12 +1741,9 @@ async function checkChatPayment(agOrderId, telegramId) {
   const status = String(data.status || '').toUpperCase();
 
   if (status === 'PAID') {
-    const receivedPaise = Math.round(Number(data.amount) * 100);
+    const receivedPaise = rupeesToPaise(data.amount);
 
-    if (
-      !Number.isSafeInteger(receivedPaise) ||
-      receivedPaise !== Number(order.amount_paise)
-    ) {
+    if (receivedPaise !== Number(order.amount_paise)) {
       await admin(
         `PAYMENT AMOUNT MISMATCH\nOrder: ${order.id}\nAG order: ${agOrderId}`
       );
@@ -1211,13 +1751,29 @@ async function checkChatPayment(agOrderId, telegramId) {
       return '⚠️ Payment amount does not match. Contact admin.';
     }
 
-    await fulfil(
+    const fulfilment = await fulfil(
       agOrderId,
       data.transaction_id || agOrderId,
       data.utr || ''
     );
 
-    return '✅ Payment verified. Check this chat for your product delivery.';
+    if (fulfilment.status === 'paid') {
+      return '✅ Payment verified and product delivered. Check this chat.';
+    }
+
+    if (fulfilment.status === 'manual_review') {
+      return '⚠️ Payment received. Your order needs admin review.';
+    }
+
+    if (fulfilment.status === 'processing') {
+      return '⏳ Your order is still processing.';
+    }
+
+    if (fulfilment.status === 'supplier_failed') {
+      return '⚠️ Supplier could not fulfil the order. Contact support.';
+    }
+
+    return '⏳ Your order is being checked.';
   }
 
   if (status === 'EXPIRED') {
@@ -1233,20 +1789,28 @@ async function checkChatPayment(agOrderId, telegramId) {
   return '⏳ Payment is still pending. Please try again shortly.';
 }
 
-// Express middleware
+// --------------------------------------------------
+// EXPRESS AND MINI APP
+// --------------------------------------------------
+
 app.use('/ag-webhook', express.raw({ type: '*/*' }));
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(dir, 'public')));
 
 app.get('/health', (_, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/products', (_, res) => {
-  res.json(products);
+app.get('/api/products', async (_, res) => {
+  try {
+    const liveProducts = await getLiveProducts();
+    res.json(liveProducts);
+  } catch (error) {
+    console.error('Products endpoint error:', error.message);
+    res.status(503).json({ error: 'Product catalogue is unavailable.' });
+  }
 });
 
-// Validate Telegram Mini App initData
 function validInit(initData) {
   if (!BOT_TOKEN || !initData) return false;
 
@@ -1285,16 +1849,26 @@ function validInit(initData) {
   return age >= 0 && age < 86400;
 }
 
-// Legacy Mini App create-order endpoint
+function getTelegramUser(initData) {
+  try {
+    const params = new URLSearchParams(initData);
+    return JSON.parse(params.get('user') || '{}');
+  } catch {
+    return null;
+  }
+}
+
+// Mini App order creation.
+// Expected items: [{ productId, durationId, quantity }]
 app.post('/api/create-order', async (req, res) => {
   try {
     if (!pool || !AG_API_KEY || !PUBLIC_BASE_URL) {
       return res.status(503).json({
-        error: 'Set DATABASE_URL, AG_API_KEY and PUBLIC_BASE_URL in Railway.'
+        error: 'Payment system is not configured.'
       });
     }
 
-    const { initData, productId } = req.body;
+    const { initData } = req.body;
 
     if (!validInit(initData)) {
       return res.status(401).json({
@@ -1302,49 +1876,63 @@ app.post('/api/create-order', async (req, res) => {
       });
     }
 
-    const user = JSON.parse(
-      new URLSearchParams(initData).get('user') || '{}'
-    );
+    const user = getTelegramUser(initData);
 
-    const ids = Array.isArray(req.body.productIds)
-      ? [...new Set(req.body.productIds)]
-      : [productId];
+    if (!user?.id) {
+      return res.status(401).json({
+        error: 'Telegram user could not be verified.'
+      });
+    }
 
-    if (!ids.length || ids.length > 20 || ids.some(id => !id)) {
+    const inputItems = Array.isArray(req.body.items)
+      ? req.body.items
+      : [];
+
+    if (!inputItems.length || inputItems.length > 20) {
       return res.status(400).json({
         error: 'Cart is empty or too large.'
       });
     }
 
-    const chosen = ids.map(id =>
-      products.find(item => item.id === id && item.active)
-    );
+    const orderItems = [];
+    let totalPaise = 0;
 
-    if (chosen.some(item => !item)) {
-      return res.status(404).json({
-        error: 'A product is unavailable.'
-      });
-    }
+    for (const input of inputItems) {
+      const item = findProduct(input.productId);
+      const plan = findPlan(item, input.durationId);
+      const quantity = Number(input.quantity || 1);
 
-    for (const item of chosen) {
-      const stock = await pool.query(
-        `SELECT id FROM stock
-         WHERE product_id=$1 AND used=FALSE
-         LIMIT 1`,
-        [item.id]
-      );
-
-      if (!stock.rowCount) {
-        return res.status(409).json({
-          error: `${item.name} is out of stock.`
+      if (!item || !plan) {
+        return res.status(404).json({
+          error: 'A selected product or plan is unavailable.'
         });
       }
-    }
 
-    const totalPaise = chosen.reduce(
-      (sum, item) => sum + Math.round(Number(item.price_inr) * 100),
-      0
-    );
+      if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) {
+        return res.status(400).json({
+          error: 'Invalid product quantity.'
+        });
+      }
+
+      const availability = await getPlanAvailability(item, plan);
+
+      if (!availability.available || availability.stock < quantity) {
+        return res.status(409).json({
+          error: `${item.name} - ${plan.duration} does not have enough stock.`
+        });
+      }
+
+      const unitPaise = getPlanPricePaise(plan);
+
+      if (!unitPaise) {
+        return res.status(400).json({
+          error: `Invalid price for ${item.name}.`
+        });
+      }
+
+      totalPaise += unitPaise * quantity;
+      orderItems.push(getPlanSnapshot(item, plan, quantity));
+    }
 
     if (!Number.isSafeInteger(totalPaise) || totalPaise <= 0) {
       return res.status(400).json({
@@ -1359,17 +1947,24 @@ app.post('/api/create-order', async (req, res) => {
 
     const orderId = crypto.randomUUID();
 
+    const productIds = [...new Set(orderItems.map(item => item.product_id))];
+
     await pool.query(
       `INSERT INTO orders
-       (id, telegram_id, product_id, amount_paise, ag_order_id)
-       VALUES($1, $2, $3, $4, $5)`,
+       (id, telegram_id, product_id, amount_paise, ag_order_id, order_items)
+       VALUES($1, $2, $3, $4, $5, $6::jsonb)`,
       [
         orderId,
         String(user.id),
-        JSON.stringify(ids),
+        JSON.stringify(productIds),
         totalPaise,
-        payment.order_id
+        payment.order_id,
+        JSON.stringify(orderItems)
       ]
+    );
+
+    await admin(
+      `NEW MINI APP ORDER\nOrder: ${orderId}\nCustomer: ${user.id}\nAmount: ₹${formatRupees(totalPaise)}`
     );
 
     res.json({
@@ -1385,12 +1980,11 @@ app.post('/api/create-order', async (req, res) => {
     console.error('Create order error:', error);
 
     res.status(500).json({
-      error: 'Could not create payment.'
+      error: error.message || 'Could not create payment.'
     });
   }
 });
 
-// Legacy Mini App payment-status endpoint
 app.post('/api/check-payment', async (req, res) => {
   try {
     if (!pool || !AG_API_KEY) {
@@ -1409,9 +2003,9 @@ app.post('/api/check-payment', async (req, res) => {
       });
     }
 
-    const user = JSON.parse(
-      new URLSearchParams(initData).get('user') || '{}'
-    );
+    const user = getTelegramUser(initData);
+
+    if (!user?.id) return res.sendStatus(401);
 
     const orderResult = await pool.query(
       `SELECT * FROM orders
@@ -1420,17 +2014,29 @@ app.post('/api/check-payment', async (req, res) => {
     );
 
     if (!orderResult.rowCount) {
-      return res.status(404).json({
-        error: 'Order not found.'
-      });
+      return res.status(404).json({ error: 'Order not found.' });
     }
 
     const order = orderResult.rows[0];
 
-    if (order.status === 'paid') {
+    if (order.status === 'paid' && order.fulfillment_status === 'delivered') {
       return res.json({
         status: 'PAID',
-        message: 'Payment already confirmed.'
+        message: 'Payment confirmed and product delivered.'
+      });
+    }
+
+    if (order.fulfillment_status === 'manual_review') {
+      return res.json({
+        status: 'MANUAL_REVIEW',
+        message: 'Payment received. Admin review is required.'
+      });
+    }
+
+    if (order.fulfillment_status === 'processing') {
+      return res.json({
+        status: 'PROCESSING',
+        message: 'Your product is being processed.'
       });
     }
 
@@ -1439,14 +2045,11 @@ app.post('/api/check-payment', async (req, res) => {
     const status = String(data.status || '').toUpperCase();
 
     if (status === 'PAID') {
-      const receivedPaise = Math.round(Number(data.amount) * 100);
+      const receivedPaise = rupeesToPaise(data.amount);
 
-      if (
-        !Number.isSafeInteger(receivedPaise) ||
-        receivedPaise !== Number(order.amount_paise)
-      ) {
+      if (receivedPaise !== Number(order.amount_paise)) {
         await admin(
-          `PAYMENT AMOUNT MISMATCH\nOrder: ${order.id}\nAG order: ${agOrderId}`
+          `MINI APP PAYMENT AMOUNT MISMATCH\nOrder: ${order.id}\nAG order: ${agOrderId}`
         );
 
         return res.status(400).json({
@@ -1454,15 +2057,36 @@ app.post('/api/check-payment', async (req, res) => {
         });
       }
 
-      await fulfil(
+      const fulfilment = await fulfil(
         agOrderId,
         data.transaction_id || agOrderId,
         data.utr || ''
       );
 
+      if (fulfilment.status === 'paid') {
+        return res.json({
+          status: 'PAID',
+          message: 'Payment verified and product delivered.'
+        });
+      }
+
+      if (fulfilment.status === 'manual_review') {
+        return res.json({
+          status: 'MANUAL_REVIEW',
+          message: 'Payment received. Admin review is required.'
+        });
+      }
+
+      if (fulfilment.status === 'supplier_failed') {
+        return res.json({
+          status: 'SUPPLIER_FAILED',
+          message: 'Supplier could not fulfil the order.'
+        });
+      }
+
       return res.json({
-        status: 'PAID',
-        message: 'Payment verified. Check Telegram for delivery.'
+        status: 'PROCESSING',
+        message: 'Your product is being processed.'
       });
     }
 
@@ -1477,7 +2101,7 @@ app.post('/api/check-payment', async (req, res) => {
     res.json({
       status: status || 'PENDING',
       message: status === 'EXPIRED'
-        ? 'Payment expired. Please create a new order.'
+        ? 'Payment expired.'
         : 'Waiting for payment.'
     });
   } catch (error) {
@@ -1489,12 +2113,13 @@ app.post('/api/check-payment', async (req, res) => {
   }
 });
 
-// AG Gateway webhook
+// --------------------------------------------------
+// AG WEBHOOK
+// --------------------------------------------------
+
 app.post('/ag-webhook', async (req, res) => {
   try {
-    if (!AG_WEBHOOK_SECRET || !pool) {
-      return res.sendStatus(503);
-    }
+    if (!AG_WEBHOOK_SECRET || !pool) return res.sendStatus(503);
 
     const rawBody = req.body;
     const timestamp = req.headers['x-ag-timestamp'];
@@ -1536,17 +2161,15 @@ app.post('/ag-webhook', async (req, res) => {
     const agOrderId = event.data?.order_id;
 
     if (event.event === 'payment.paid' && agOrderId) {
-      // Always verify payment directly with AG before crediting or delivering.
+      // Verify directly with AG before any credit or delivery.
       const verification = await verifyAGPayment(agOrderId);
       const data = verification.data || {};
 
       if (String(data.status || '').toUpperCase() === 'PAID') {
-        const receivedPaise = Math.round(Number(data.amount) * 100);
+        const receivedPaise = rupeesToPaise(data.amount);
 
-        // First check whether this is a wallet deposit.
         const depositResult = await pool.query(
-          `SELECT * FROM wallet_deposits
-           WHERE ag_order_id=$1`,
+          'SELECT * FROM wallet_deposits WHERE ag_order_id=$1',
           [agOrderId]
         );
 
@@ -1569,7 +2192,7 @@ app.post('/ag-webhook', async (req, res) => {
               });
 
               await admin(
-                `WALLET DEPOSIT SUCCESSFUL\nCustomer: ${credited.telegramId}\nAdded: ₹${formatRupees(credited.amountPaise)}\nNew balance: ₹${formatRupees(credited.balancePaise)}\nAG Order: ${agOrderId}`
+                `WALLET DEPOSIT SUCCESSFUL\nCustomer: ${credited.telegramId}\nAdded: ₹${formatRupees(credited.amountPaise)}\nAG Order: ${agOrderId}`
               );
             }
           } else {
@@ -1578,7 +2201,6 @@ app.post('/ag-webhook', async (req, res) => {
             );
           }
         } else {
-          // Otherwise check for a normal product order.
           const orderResult = await pool.query(
             'SELECT * FROM orders WHERE ag_order_id=$1',
             [agOrderId]
@@ -1595,7 +2217,7 @@ app.post('/ag-webhook', async (req, res) => {
               );
             } else {
               await admin(
-                `PAYMENT AMOUNT MISMATCH\nOrder: ${order.id}\nAG order: ${agOrderId}`
+                `PRODUCT PAYMENT AMOUNT MISMATCH\nOrder: ${order.id}\nAG order: ${agOrderId}`
               );
             }
           }
@@ -1610,7 +2232,10 @@ app.post('/ag-webhook', async (req, res) => {
   }
 });
 
-// Telegram bot webhook
+// --------------------------------------------------
+// TELEGRAM WEBHOOK
+// --------------------------------------------------
+
 app.post('/telegram-webhook', async (req, res) => {
   res.sendStatus(200);
 
@@ -1618,7 +2243,6 @@ app.post('/telegram-webhook', async (req, res) => {
     const message = req.body.message;
     const callback = req.body.callback_query;
 
-    // Inline button actions
     if (callback) {
       const chatId = callback.message?.chat?.id;
       const userId = callback.from?.id;
@@ -1628,25 +2252,19 @@ app.post('/telegram-webhook', async (req, res) => {
         callback_query_id: callback.id
       });
 
-      // Delete the inline menu after the customer selects a button
       await deleteSelectedMenu(
         chatId,
         callback.message?.message_id
       );
 
       try {
-        // Return to store categories
         if (action === 'store_categories') {
           await showProducts(chatId);
           return;
         }
 
-        // Open selected category
         if (action.startsWith('category:')) {
-          await showCategoryProducts(
-            chatId,
-            action.slice(9)
-          );
+          await showCategoryProducts(chatId, action.slice(9));
           return;
         }
 
@@ -1655,20 +2273,26 @@ app.post('/telegram-webhook', async (req, res) => {
           return;
         }
 
+        if (action.startsWith('plan:')) {
+          const [, productId, durationId] = action.split(':');
+          await showPlanPaymentMethods(chatId, productId, durationId);
+          return;
+        }
+
         if (action.startsWith('upibuy:')) {
-          await createChatOrder(
-            chatId,
-            userId,
-            action.slice(7)
-          );
+          const [, productId, durationId] = action.split(':');
+          await createChatOrder(chatId, userId, productId, durationId);
           return;
         }
 
         if (action.startsWith('walletbuy:')) {
+          const [, productId, durationId] = action.split(':');
+
           const result = await purchaseWithWallet(
             chatId,
             userId,
-            action.slice(10)
+            productId,
+            durationId
           );
 
           if (result?.insufficient) {
@@ -1677,7 +2301,7 @@ app.post('/telegram-webhook', async (req, res) => {
               text:
                 `❌ INSUFFICIENT WALLET BALANCE\n\n` +
                 `Your balance: ₹${formatRupees(result.balance)}\n` +
-                `Product price: ₹${formatRupees(result.required)}\n\n` +
+                `Required: ₹${formatRupees(result.required)}\n\n` +
                 `Please add money to your wallet.`,
               reply_markup: {
                 inline_keyboard: [[{
@@ -1705,7 +2329,7 @@ app.post('/telegram-webhook', async (req, res) => {
             chat_id: chatId,
             text:
               `➕ ADD MONEY TO WALLET\n\n` +
-              `Send the amount you want to add in rupees.\n\n` +
+              `Send the amount in rupees.\n\n` +
               `Minimum: ₹${MIN_WALLET_DEPOSIT}\n` +
               `Maximum: ₹${MAX_WALLET_DEPOSIT}\n\n` +
               `Example: 100\n\n` +
@@ -1743,12 +2367,15 @@ app.post('/telegram-webhook', async (req, res) => {
 
           await tg('sendMessage', {
             chat_id: chatId,
-            text: result
+            text: result,
+            reply_markup: MAIN_MENU
           });
 
           return;
         }
       } catch (error) {
+        console.error('Telegram callback error:', error);
+
         await tg('sendMessage', {
           chat_id: chatId,
           text: `❌ ${error.message}`,
@@ -1765,7 +2392,6 @@ app.post('/telegram-webhook', async (req, res) => {
     const userId = message.from.id;
     const input = message.text.trim();
 
-    // Remove the previous main menu after a customer sends a selection
     await deleteTrackedMenu(chatId);
 
     if (input === '/start' || input.startsWith('/start ')) {
@@ -1784,11 +2410,9 @@ app.post('/telegram-webhook', async (req, res) => {
         text: 'Use the buttons below to browse products and manage your orders.',
         reply_markup: MAIN_MENU
       });
-
       return;
     }
 
-    // Handle a custom wallet deposit amount
     const sessionResult = await pool.query(
       `SELECT * FROM wallet_sessions
        WHERE telegram_id=$1 AND expires_at > NOW()`,
@@ -1807,7 +2431,6 @@ app.post('/telegram-webhook', async (req, res) => {
           text: '❌ Please send a whole number, for example 100.',
           reply_markup: MAIN_MENU
         });
-
         return;
       }
 
@@ -1825,15 +2448,7 @@ app.post('/telegram-webhook', async (req, res) => {
     }
 
     if (input === '🛍️ Product Store') {
-      try {
-        await showProducts(chatId);
-      } catch (error) {
-        await tg('sendMessage', {
-          chat_id: chatId,
-          text: `❌ ${error.message}`
-        });
-      }
-
+      await showProducts(chatId);
       return;
     }
 
@@ -1844,11 +2459,9 @@ app.post('/telegram-webhook', async (req, res) => {
           `👤 MY PROFILE\n\n` +
           `Name: ${message.from.first_name || 'User'}\n` +
           `Username: ${message.from.username ? '@' + message.from.username : 'Not set'}\n` +
-          `Telegram ID: ${userId}\n\n` +
-          `🔥 FREE FIRE PANELS MARKETPLACE`,
+          `Telegram ID: ${userId}`,
         reply_markup: MAIN_MENU
       });
-
       return;
     }
 
@@ -1860,27 +2473,21 @@ app.post('/telegram-webhook', async (req, res) => {
         text:
           `💳 MY WALLET\n\n` +
           `👛 Available balance: ₹${formatRupees(balance)}\n\n` +
-          `You can add money using UPI and use your wallet balance to purchase products.`,
+          `Add money using UPI and use your wallet to purchase products.`,
         reply_markup: {
           inline_keyboard: [
-            [{
-              text: '➕ ADD MONEY',
-              callback_data: 'walletadd'
-            }],
-            [{
-              text: '📜 WALLET HISTORY',
-              callback_data: 'wallethistory'
-            }]
+            [{ text: '➕ ADD MONEY', callback_data: 'walletadd' }],
+            [{ text: '📜 WALLET HISTORY', callback_data: 'wallethistory' }]
           ]
         }
       });
-
       return;
     }
 
     if (input === '📄 All Orders') {
       const result = await pool.query(
-        `SELECT id, product_id, amount_paise, status, created_at
+        `SELECT id, product_id, order_items, amount_paise,
+                status, fulfillment_status, created_at
          FROM orders
          WHERE telegram_id=$1
          ORDER BY created_at DESC
@@ -1894,28 +2501,39 @@ app.post('/telegram-webhook', async (req, res) => {
           text: '📄 You have no orders yet.',
           reply_markup: MAIN_MENU
         });
-
         return;
       }
 
       const orderText = result.rows.map((order, index) => {
-        let ids;
+        let names = [];
 
-        try {
-          ids = JSON.parse(order.product_id);
-        } catch {
-          ids = [order.product_id];
+        if (order.order_items) {
+          const items = Array.isArray(order.order_items)
+            ? order.order_items
+            : JSON.parse(order.order_items);
+
+          names = items.map(item =>
+            `${item.product_name} (${item.duration})`
+          );
+        } else {
+          let ids;
+
+          try {
+            ids = JSON.parse(order.product_id);
+          } catch {
+            ids = [order.product_id];
+          }
+
+          names = ids.map(id =>
+            products.find(product => product.id === id)?.name || id
+          );
         }
 
-        const names = ids.map(id =>
-          products.find(p => p.id === id)?.name || id
-        ).join(', ');
-
         return (
-          `${index + 1}. ${names}\n` +
+          `${index + 1}. ${names.join(', ')}\n` +
           `Order: ${order.id}\n` +
           `Amount: ₹${formatRupees(order.amount_paise)}\n` +
-          `Status: ${order.status.toUpperCase()}`
+          `Status: ${(order.fulfillment_status || order.status).toUpperCase()}`
         );
       }).join('\n\n');
 
@@ -1924,7 +2542,6 @@ app.post('/telegram-webhook', async (req, res) => {
         text: `📄 YOUR ORDERS\n\n${orderText}`,
         reply_markup: MAIN_MENU
       });
-
       return;
     }
 
@@ -1939,7 +2556,6 @@ app.post('/telegram-webhook', async (req, res) => {
           `Share this link with your friends! Referral rewards are not enabled yet.`,
         reply_markup: MAIN_MENU
       });
-
       return;
     }
 
@@ -1947,6 +2563,7 @@ app.post('/telegram-webhook', async (req, res) => {
       const result = await pool.query(
         `SELECT ag_order_id FROM orders
          WHERE telegram_id=$1 AND status='pending'
+           AND ag_order_id IS NOT NULL
          ORDER BY created_at DESC
          LIMIT 1`,
         [String(userId)]
@@ -1958,7 +2575,6 @@ app.post('/telegram-webhook', async (req, res) => {
           text: 'No pending product payment found.',
           reply_markup: MAIN_MENU
         });
-
         return;
       }
 
@@ -1980,7 +2596,6 @@ app.post('/telegram-webhook', async (req, res) => {
           reply_markup: MAIN_MENU
         });
       }
-
       return;
     }
 
@@ -1992,7 +2607,6 @@ app.post('/telegram-webhook', async (req, res) => {
           : '🎬 Tutorial will be available soon.',
         reply_markup: MAIN_MENU
       });
-
       return;
     }
 
@@ -2004,7 +2618,6 @@ app.post('/telegram-webhook', async (req, res) => {
           : '📞 Contact the shop administrator for support.',
         reply_markup: MAIN_MENU
       });
-
       return;
     }
 
@@ -2018,7 +2631,10 @@ app.post('/telegram-webhook', async (req, res) => {
   }
 });
 
-// Register Telegram webhook
+// --------------------------------------------------
+// ADMIN: REGISTER TELEGRAM WEBHOOK
+// --------------------------------------------------
+
 app.post('/admin/set-webhook', async (req, res) => {
   if (
     !process.env.SETUP_SECRET ||
@@ -2029,69 +2645,50 @@ app.post('/admin/set-webhook', async (req, res) => {
 
   try {
     if (!PUBLIC_BASE_URL) {
-      throw new Error('PUBLIC_BASE_URL is missing');
+      throw new Error('PUBLIC_BASE_URL is missing.');
     }
 
     const result = await tg('setWebhook', {
       url: `${PUBLIC_BASE_URL.replace(/\/$/, '')}/telegram-webhook`
     });
 
-    res.json({
-      ok: true,
-      result
-    });
+    res.json({ ok: true, result });
   } catch (error) {
-    res.status(500).json({
-      error: error.message
-    });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Retrieve products from ARPAN reseller API
-// This only reads the product list. It does NOT buy anything.
-async function getArpanProducts() {
-  const arpanApiKey = process.env.ARPAN_API_KEY;
-
-  if (!arpanApiKey) {
-    console.error('ARPAN_API_KEY is missing in Railway Variables.');
-    return;
+// Optional manual catalogue refresh endpoint for admin diagnostics.
+app.get('/admin/arpan-products', async (req, res) => {
+  if (
+    !process.env.SETUP_SECRET ||
+    req.headers['x-setup-secret'] !== process.env.SETUP_SECRET
+  ) {
+    return res.sendStatus(403);
   }
 
   try {
-    const body = new URLSearchParams({
-      api_key: arpanApiKey,
-      action: 'products'
-    });
-
-    const response = await fetch(
-      'https://arpanxlive.site/api/reseller_v1.php',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded'
-        },
-        body,
-        signal: AbortSignal.timeout(20000)
-      }
-    );
-
-    const result = await response.text();
-
-    console.log('========== ARPAN PRODUCTS ==========');
-    console.log('HTTP Status:', response.status);
-    console.log(result);
-    console.log('====================================');
+    const catalog = await getArpanCatalog(true);
+    res.json({ ok: true, products: catalog });
   } catch (error) {
-    console.error('ARPAN products error:', error.message);
+    res.status(502).json({ ok: false, error: error.message });
   }
-}
+});
 
-// Initialize database and start server
+// --------------------------------------------------
+// START SERVER
+// --------------------------------------------------
+
 await initDb();
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Listening on ${PORT}`);
 });
 
-// Retrieve ARPAN products after the server starts
-getArpanProducts();
+getArpanCatalog(true)
+  .then(catalog => {
+    console.log(`ARPAN catalogue loaded: ${catalog.length} products.`);
+  })
+  .catch(error => {
+    console.error('ARPAN catalogue startup check failed:', error.message);
+  });
