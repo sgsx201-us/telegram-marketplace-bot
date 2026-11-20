@@ -50,9 +50,7 @@
       color: white;
     }
 
-    .tabs button.active {
-      background: #ff642d;
-    }
+    .tabs button.active { background: #ff642d; }
 
     .products {
       display: grid;
@@ -68,8 +66,36 @@
     }
 
     .product h3 { font-size: 15px; margin: 5px 0 8px; }
-    .product p { color: #b9bac8; font-size: 12px; min-height: 32px; }
-    .price { color: #65e6a0; font-weight: bold; margin: 10px 0; }
+    .product p {
+      color: #b9bac8;
+      font-size: 12px;
+      min-height: 32px;
+    }
+
+    .price {
+      color: #65e6a0;
+      font-weight: bold;
+      margin: 10px 0;
+    }
+
+    .plan-select {
+      width: 100%;
+      padding: 10px;
+      margin: 8px 0;
+      border-radius: 9px;
+      border: 1px solid #48495a;
+      background: #151621;
+      color: white;
+    }
+
+    .stock {
+      font-size: 12px;
+      font-weight: bold;
+      margin: 8px 0;
+    }
+
+    .in-stock { color: #65e6a0; }
+    .out-stock { color: #ff7777; }
 
     .add, .checkout, .check-payment {
       width: 100%;
@@ -82,10 +108,7 @@
       cursor: not-allowed;
     }
 
-    .panel {
-      margin-top: 18px;
-    }
-
+    .panel { margin-top: 18px; }
     .panel h2 { font-size: 18px; margin-top: 0; }
 
     .cart-item {
@@ -96,6 +119,8 @@
       border-bottom: 1px solid #383947;
       font-size: 13px;
     }
+
+    .cart-item span { overflow-wrap: anywhere; }
 
     .total {
       display: flex;
@@ -144,6 +169,10 @@
       font-size: 11px;
       padding: 25px 5px;
     }
+
+    @media (max-width: 350px) {
+      .products { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 
@@ -154,15 +183,14 @@
   </header>
 
   <div class="tabs">
-    <button id="freefireTab" class="active" onclick="showCategory('freefire')">
-      🔥 Free Fire
-    </button>
-    <button id="upiTab" onclick="showCategory('upi')">
-      💳 UPI / Payments
-    </button>
-    <button id="allTab" onclick="showCategory('all')">
-      All
-    </button>
+    <button id="freefireTab" class="active"
+      onclick="showCategory('freefire')">🔥 Free Fire</button>
+
+    <button id="upiTab"
+      onclick="showCategory('upi')">💳 UPI / Payments</button>
+
+    <button id="allTab"
+      onclick="showCategory('all')">All</button>
   </div>
 
   <main>
@@ -172,6 +200,7 @@
 
     <section class="panel">
       <h2>🛒 Your Cart</h2>
+
       <div id="cart">
         <p class="message">Your cart is empty.</p>
       </div>
@@ -184,22 +213,31 @@
       <button class="checkout" id="checkout" onclick="checkout()">
         Proceed to Payment
       </button>
+
       <p id="shopMessage" class="message"></p>
     </section>
 
     <section class="panel payment" id="payment">
       <h2>💳 Complete Your Payment</h2>
+
       <p id="paymentAmount" class="price"></p>
+
       <img id="qr" alt="Payment QR code" hidden>
-      <a id="payLink" href="#" target="_blank" rel="noopener" hidden>
-        Open Payment Page
-      </a>
+
+      <a id="payLink" href="#" target="_blank"
+        rel="noopener" hidden>Open Payment Page</a>
+
       <a id="upiLink" href="#" hidden>Pay using UPI app</a>
+
       <p class="message">
         Complete the payment, then check your payment status below.
       </p>
+
       <button class="check-payment" id="checkPayment"
-        onclick="checkPayment()">I Have Paid — Verify Payment</button>
+        onclick="checkPayment()">
+        I Have Paid — Verify Payment
+      </button>
+
       <p id="paymentMessage" class="message"></p>
     </section>
   </main>
@@ -210,6 +248,7 @@
 
 <script>
   const tg = window.Telegram?.WebApp;
+
   if (tg) {
     tg.ready();
     tg.expand();
@@ -221,17 +260,21 @@
   let currentPayment = null;
   let checking = false;
 
-  const money = value => '₹' + Number(value).toFixed(2);
+  const money = value => '₹' + Number(value || 0).toFixed(2);
 
   function safeCategory(product) {
-    const value = String(
-      product.category || product.category_id || ''
-    ).toLowerCase();
+    const categories = Array.isArray(product.categories)
+      ? product.categories.join(' ')
+      : (product.category || product.category_id || '');
+
+    const value = String(categories).toLowerCase();
 
     if (/upi|payment/.test(value)) return 'upi';
 
-    const text = (product.name + ' ' + product.id).toLowerCase();
-    if (/upi|payment/.test(text)) return 'upi';
+    const text = String(product.name || '') + ' ' +
+      String(product.id || '');
+
+    if (/upi|payment/i.test(text)) return 'upi';
 
     return 'freefire';
   }
@@ -242,9 +285,11 @@
     document.getElementById('freefireTab').classList.toggle(
       'active', value === 'freefire'
     );
+
     document.getElementById('upiTab').classList.toggle(
       'active', value === 'upi'
     );
+
     document.getElementById('allTab').classList.toggle(
       'active', value === 'all'
     );
@@ -257,7 +302,10 @@
 
     try {
       const response = await fetch('/api/products');
-      if (!response.ok) throw new Error('Could not load products.');
+
+      if (!response.ok) {
+        throw new Error('Could not load products.');
+      }
 
       products = await response.json();
 
@@ -270,6 +318,14 @@
       container.innerHTML =
         '<div class="empty">Could not load products. Please try again later.</div>';
     }
+  }
+
+  function getPlans(product) {
+    return Array.isArray(product.plans) ? product.plans : [];
+  }
+
+  function planStock(plan) {
+    return Number(plan.stock || 0);
   }
 
   function renderProducts() {
@@ -295,36 +351,116 @@
       name.textContent = product.name;
 
       const description = document.createElement('p');
-      description.textContent = product.description || 'Digital product';
+      description.textContent =
+        product.description || 'Digital product';
+
+      card.append(name, description);
+
+      const plans = getPlans(product);
+
+      if (!plans.length) {
+        const notice = document.createElement('p');
+        notice.className = 'message';
+        notice.textContent = 'Plans are currently unavailable.';
+        card.appendChild(notice);
+        container.appendChild(card);
+        return;
+      }
+
+      const select = document.createElement('select');
+      select.className = 'plan-select';
+
+      plans.forEach((plan, index) => {
+        const option = document.createElement('option');
+        option.value = String(index);
+
+        const stock = planStock(plan);
+        const stockText = stock > 0
+          ? ' • IN STOCK: ' + stock
+          : ' • OUT OF STOCK';
+
+        option.textContent =
+          plan.duration + ' — ' + money(plan.price_inr) + stockText;
+
+        select.appendChild(option);
+      });
 
       const price = document.createElement('div');
       price.className = 'price';
-      price.textContent = money(product.price_inr);
+
+      const stockLabel = document.createElement('div');
+      stockLabel.className = 'stock';
 
       const add = document.createElement('button');
       add.className = 'add';
-      add.textContent = cart.some(item => item.id === product.id)
-        ? 'Added'
-        : 'Add to Cart';
-      add.disabled = cart.some(item => item.id === product.id);
-      add.onclick = () => addToCart(product.id);
 
-      card.append(name, description, price, add);
+      function updateSelectedPlan() {
+        const plan = plans[Number(select.value)];
+        const stock = planStock(plan);
+
+        price.textContent = money(plan.price_inr);
+
+        if (stock > 0) {
+          stockLabel.textContent = '✅ IN STOCK: ' + stock;
+          stockLabel.className = 'stock in-stock';
+        } else {
+          stockLabel.textContent = '❌ OUT OF STOCK';
+          stockLabel.className = 'stock out-stock';
+        }
+
+        const alreadyAdded = cart.some(item =>
+          item.productId === product.id &&
+          String(item.durationId) === String(plan.duration_id)
+        );
+
+        add.textContent = alreadyAdded ? 'Added to Cart' : 'Add to Cart';
+        add.disabled = stock <= 0 || alreadyAdded;
+      }
+
+      select.addEventListener('change', updateSelectedPlan);
+
+      add.onclick = () => {
+        const plan = plans[Number(select.value)];
+
+        if (!plan || planStock(plan) <= 0) return;
+
+        addToCart(product, plan);
+        updateSelectedPlan();
+      };
+
+      card.append(select, price, stockLabel, add);
       container.appendChild(card);
+
+      updateSelectedPlan();
     });
   }
 
-  function addToCart(id) {
-    const product = products.find(item => item.id === id);
-    if (!product || cart.some(item => item.id === id)) return;
+  function addToCart(product, plan) {
+    const exists = cart.some(item =>
+      item.productId === product.id &&
+      String(item.durationId) === String(plan.duration_id)
+    );
 
-    cart.push(product);
+    if (exists || planStock(plan) <= 0) return;
+
+    cart.push({
+      productId: product.id,
+      durationId: plan.duration_id,
+      name: product.name,
+      duration: plan.duration,
+      price: Number(plan.price_inr)
+    });
+
     renderCart();
     renderProducts();
   }
 
-  function removeFromCart(id) {
-    cart = cart.filter(item => item.id !== id);
+  function removeFromCart(productId, durationId) {
+    cart = cart.filter(item =>
+      !(item.productId === productId &&
+        String(item.durationId) === String(durationId))
+    );
+
     renderCart();
     renderProducts();
   }
@@ -334,21 +470,26 @@
     container.innerHTML = '';
 
     if (!cart.length) {
-      container.innerHTML = '<p class="message">Your cart is empty.</p>';
+      container.innerHTML =
+        '<p class="message">Your cart is empty.</p>';
     } else {
       cart.forEach(item => {
         const row = document.createElement('div');
         row.className = 'cart-item';
 
         const label = document.createElement('span');
-        label.textContent = item.name + ' — ' + money(item.price_inr);
+        label.textContent =
+          item.name + ' (' + item.duration + ') — ' +
+          money(item.price);
 
         const remove = document.createElement('button');
         remove.textContent = 'Remove';
         remove.style.background = '#414253';
         remove.style.color = 'white';
         remove.style.padding = '7px';
-        remove.onclick = () => removeFromCart(item.id);
+
+        remove.onclick = () =>
+          removeFromCart(item.productId, item.durationId);
 
         row.append(label, remove);
         container.appendChild(row);
@@ -356,7 +497,7 @@
     }
 
     const total = cart.reduce(
-      (sum, item) => sum + Number(item.price_inr), 0
+      (sum, item) => sum + item.price, 0
     );
 
     document.getElementById('total').textContent = money(total);
@@ -384,7 +525,12 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           initData: tg.initData,
-          productIds: cart.map(item => item.id)
+
+          items: cart.map(item => ({
+            productId: item.productId,
+            durationId: item.durationId,
+            quantity: 1
+          }))
         })
       });
 
@@ -404,6 +550,7 @@
         'Amount: ' + money(data.amount);
 
       const qr = document.getElementById('qr');
+
       if (data.qrPngUrl) {
         qr.src = data.qrPngUrl;
         qr.hidden = false;
@@ -412,11 +559,14 @@
       }
 
       const payLink = document.getElementById('payLink');
+
       if (data.payUrl) {
         payLink.href = data.payUrl;
         payLink.hidden = false;
+
         payLink.onclick = event => {
           event.preventDefault();
+
           if (tg) tg.openLink(data.payUrl);
           else window.open(data.payUrl, '_blank');
         };
@@ -425,6 +575,7 @@
       }
 
       const upiLink = document.getElementById('upiLink');
+
       if (data.upiLink) {
         upiLink.href = data.upiLink;
         upiLink.hidden = false;
@@ -436,6 +587,7 @@
         'Payment order created. Complete payment and verify below.';
 
       document.getElementById('payment').style.display = 'block';
+
       document.getElementById('payment').scrollIntoView({
         behavior: 'smooth'
       });
@@ -458,6 +610,7 @@
     }
 
     checking = true;
+
     const button = document.getElementById('checkPayment');
     const message = document.getElementById('paymentMessage');
 
@@ -483,6 +636,7 @@
       if (data.status === 'PAID') {
         message.textContent =
           'Payment confirmed! Check your Telegram chat for delivery.';
+
         cart = [];
         renderCart();
         renderProducts();
