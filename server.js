@@ -1583,7 +1583,135 @@ async function createChatOrder(chatId, telegramId, productId, durationId) {
 // --------------------------------------------------
 // WALLET PRODUCT PURCHASE
 // --------------------------------------------------
+// --------------------------------------------------
+// HYBRID CHECKOUT: WALLET FIRST, THEN UPI
+// --------------------------------------------------
 
+async function createHybridOrder(telegramId, orderItems) {
+  if (!pool || !AG_API_KEY || !PUBLIC_BASE_URL) {
+    throw new Error('Payment system is not configured.');
+  }
+
+  const totalPaise = orderItems.reduce((sum, item) => {
+    return sum +
+      rupeesToPaise(item.unit_price_inr) * Number(item.quantity);
+  }, 0);
+
+  if (!Number.isSafeInteger(totalPaise) || totalPaise <= 0) {
+    throw new Error('Invalid order amount.');
+  }
+
+  const orderId = crypto.randomUUID();
+  const productIds = [
+    ...new Set(orderItems.map(item => item.product_id))
+  ];
+
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    await client.query(
+      `INSERT INTO wallets(telegram_id, balance_paise)
+       VALUES($1, 0)
+       ON CONFLICT(telegram_id) DO NOTHING`,
+      [String(telegramId)]
+    );
+
+    const walletResult = await client.query(
+      `SELECT balance_paise
+       FROM wallets
+       WHERE telegram_id=$1
+       FOR UPDATE`,
+      [String(telegramId)]
+    );
+
+    const balancePaise = Number(walletResult.rows[0].balance_paise);
+    const walletUsedPaise = Math.min(balancePaise, totalPaise);
+    const upiAmountPaise = totalPaise - walletUsedPaise;
+
+    // Full wallet payment should use the existing wallet checkout.
+    if (upiAmountPaise <= 0) {
+      await client.query('ROLLBACK');
+
+      return {
+        walletOnlyRequired: true,
+        totalPaise,
+        balancePaise
+      };
+    }
+
+    // Keep the wallet row locked while creating the payment.
+    const payment = await createAGPayment(
+      upiAmountPaise / 100,
+      getCallbackUrl()
+    );
+
+    if (walletUsedPaise > 0) {
+      await client.query(
+        `UPDATE wallets
+         SET balance_paise=balance_paise-$1,
+             updated_at=NOW()
+         WHERE telegram_id=$2`,
+        [walletUsedPaise, String(telegramId)]
+      );
+
+      await client.query(
+        `INSERT INTO wallet_transactions
+         (telegram_id, type, amount_paise, reference, description)
+         VALUES($1, 'debit', $2, $3, $4)`,
+        [
+          String(telegramId),
+          walletUsedPaise,
+          `purchase:${orderId}`,
+          'Wallet contribution to UPI product order'
+        ]
+      );
+    }
+
+    await client.query(
+      `INSERT INTO orders
+       (
+         id,
+         telegram_id,
+         product_id,
+         amount_paise,
+         ag_order_id,
+         order_items,
+         payment_id,
+         order_total_paise,
+         wallet_used_paise
+       )
+       VALUES($1, $2, $3, $4, $5, $6::jsonb, 'upi_wallet', $7, $8)`,
+      [
+        orderId,
+        String(telegramId),
+        JSON.stringify(productIds),
+        upiAmountPaise,
+        payment.order_id,
+        JSON.stringify(orderItems),
+        totalPaise,
+        walletUsedPaise
+      ]
+    );
+
+    await client.query('COMMIT');
+
+    return {
+      walletOnlyRequired: false,
+      orderId,
+      payment,
+      totalPaise,
+      walletUsedPaise,
+      upiAmountPaise
+    };
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
 async function purchaseWithWallet(chatId, telegramId, productId, durationId) {
   if (!pool) throw new Error('Database is not configured.');
 
