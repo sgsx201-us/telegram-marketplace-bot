@@ -5,7 +5,13 @@
     "name": "Prime Hook",
     "description": "Prime Hook",
     "category": "Android Non Root",
-    "price_inr": 65,
+    "supplier_product_id": 71,
+    "plans": [
+      { "duration_id": 22, "duration": "1 Day", "supplier_price_inr": 20, "price_inr": 35 },
+      { "duration_id": 23, "duration": "3 Days", "supplier_price_inr": 50, "price_inr": 65 },
+      { "duration_id": 24, "duration": "7 Days", "supplier_price_inr": 95, "price_inr": 110 },
+      { "duration_id": 25, "duration": "10 Days", "supplier_price_inr": 140, "price_inr": 155 }
+    ],
     "active": true
   },
   {
@@ -13,7 +19,13 @@
     "name": "Hg Chats Apk Mod",
     "description": "Hg Chats Apk Mod",
     "category": "Android Non Root",
-    "price_inr": 0,
+    "supplier_product_id": 72,
+    "plans": [
+      { "duration_id": 26, "duration": "1 Day", "supplier_price_inr": 30, "price_inr": 45 },
+      { "duration_id": 27, "duration": "7 Days", "supplier_price_inr": 65, "price_inr": 80 },
+      { "duration_id": 28, "duration": "10 Days", "supplier_price_inr": 95, "price_inr": 110 },
+      { "duration_id": 29, "duration": "30 Days", "supplier_price_inr": 140, "price_inr": 155 }
+    ],
     "active": true
   },
   {
@@ -21,7 +33,14 @@
     "name": "Bala Mod Pro V6",
     "description": "Bala Mod Pro V6",
     "category": "Android Non Root",
-    "price_inr": 0,
+    "supplier_product_id": 73,
+    "plans": [
+      { "duration_id": 30, "duration": "1 Hour", "supplier_price_inr": 7, "price_inr": 22 },
+      { "duration_id": 31, "duration": "3 Hours", "supplier_price_inr": 21, "price_inr": 36 },
+      { "duration_id": 32, "duration": "6 Hours", "supplier_price_inr": 42, "price_inr": 57 },
+      { "duration_id": 33, "duration": "12 Hours", "supplier_price_inr": 87, "price_inr": 102 },
+      { "duration_id": 34, "duration": "1 Day", "supplier_price_inr": 175, "price_inr": 190 }
+    ],
     "active": true
   },
   {
@@ -29,7 +48,13 @@
     "name": "Abcd Panel",
     "description": "Abcd Panel",
     "category": "Android Non Root",
-    "price_inr": 0,
+    "supplier_product_id": 75,
+    "plans": [
+      { "duration_id": 35, "duration": "12 Hours", "supplier_price_inr": 15, "price_inr": 30 },
+      { "duration_id": 36, "duration": "1 Day", "supplier_price_inr": 30, "price_inr": 45 },
+      { "duration_id": 37, "duration": "3 Days", "supplier_price_inr": 60, "price_inr": 75 },
+      { "duration_id": 38, "duration": "7 Days", "supplier_price_inr": 120, "price_inr": 135 }
+    ],
     "active": true
   },
   {
@@ -38,7 +63,15 @@
     "description": "Drip Wire",
     "category": "Android Non Root",
     "categories": ["Android Non Root", "Android Root", "iOS"],
-    "price_inr": 0,
+    "supplier_product_id": 76,
+    "plans": [
+      { "duration_id": 39, "duration": "3 Hours", "supplier_price_inr": 10, "price_inr": 25 },
+      { "duration_id": 40, "duration": "6 Hours", "supplier_price_inr": 20, "price_inr": 35 },
+      { "duration_id": 41, "duration": "12 Hours", "supplier_price_inr": 35, "price_inr": 50 },
+      { "duration_id": 42, "duration": "1 Day", "supplier_price_inr": 60, "price_inr": 75 },
+      { "duration_id": 43, "duration": "7 Days", "supplier_price_inr": 200, "price_inr": 215 },
+      { "duration_id": 44, "duration": "30 Days", "supplier_price_inr": 300, "price_inr": 315 }
+    ],
     "active": true
   },
   {
@@ -46,7 +79,14 @@
     "name": "Drip Client Apkmod",
     "description": "Drip Client Apkmod",
     "category": "Android Non Root",
-    "price_inr": 0,
+    "supplier_product_id": 67,
+    "plans": [
+      { "duration_id": 4, "duration": "1 Day", "supplier_price_inr": 11, "price_inr": 26 },
+      { "duration_id": 5, "duration": "3 Days", "supplier_price_inr": 25, "price_inr": 40 },
+      { "duration_id": 6, "duration": "7 Days", "supplier_price_inr": 65, "price_inr": 80 },
+      { "duration_id": 7, "duration": "15 Days", "supplier_price_inr": 104.96, "price_inr": 119.96 },
+      { "duration_id": 8, "duration": "30 Days", "supplier_price_inr": 145, "price_inr": 160 }
+    ],
     "active": true
   },
   {
@@ -54,7 +94,12 @@
     "name": "Z Rex Panel Nonroot",
     "description": "Z Rex Panel Nonroot",
     "category": "Android Non Root",
-    "price_inr": 0,
+    "supplier_product_id": 77,
+    "plans": [
+      { "duration_id": 45, "duration": "1 Day", "supplier_price_inr": 20, "price_inr": 35 },
+      { "duration_id": 46, "duration": "3 Days", "supplier_price_inr": 40, "price_inr": 55 },
+      { "duration_id": 47, "duration": "7 Days", "supplier_price_inr": 80, "price_inr": 95 }
+    ],
     "active": true
   },
   {
@@ -63,7 +108,17 @@
     "description": "X Reg Panel",
     "category": "Android Non Root",
     "categories": ["Android Non Root", "Android Root", "iOS", "PC"],
-    "price_inr": 0,
+    "supplier_product_id": 83,
+    "plans": [
+      { "duration_id": 56, "duration": "1 Hour", "supplier_price_inr": 7, "price_inr": 22 },
+      { "duration_id": 57, "duration": "3 Hours", "supplier_price_inr": 14, "price_inr": 29 },
+      { "duration_id": 58, "duration": "6 Hours", "supplier_price_inr": 20, "price_inr": 35 },
+      { "duration_id": 59, "duration": "12 Hours", "supplier_price_inr": 40, "price_inr": 55 },
+      { "duration_id": 60, "duration": "1 Day", "supplier_price_inr": 45, "price_inr": 60 },
+      { "duration_id": 61, "duration": "3 Days", "supplier_price_inr": 84, "price_inr": 99 },
+      { "duration_id": 62, "duration": "7 Days", "supplier_price_inr": 165, "price_inr": 180 },
+      { "duration_id": 63, "duration": "30 Days", "supplier_price_inr": 300, "price_inr": 315 }
+    ],
     "active": true
   },
   {
@@ -71,7 +126,12 @@
     "name": "Migul Pro iOS India",
     "description": "Migul Pro iOS India",
     "category": "iOS",
-    "price_inr": 0,
+    "supplier_product_id": 85,
+    "plans": [
+      { "duration_id": 66, "duration": "1 Day", "supplier_price_inr": 98, "price_inr": 113 },
+      { "duration_id": 67, "duration": "7 Days", "supplier_price_inr": 350, "price_inr": 365 },
+      { "duration_id": 68, "duration": "30 Days", "supplier_price_inr": 750, "price_inr": 765 }
+    ],
     "active": true
   },
   {
@@ -79,7 +139,12 @@
     "name": "Migul Pro iOS Other Server",
     "description": "Migul Pro iOS Other Server",
     "category": "iOS",
-    "price_inr": 0,
+    "supplier_product_id": 86,
+    "plans": [
+      { "duration_id": 69, "duration": "1 Day", "supplier_price_inr": 98, "price_inr": 113 },
+      { "duration_id": 70, "duration": "7 Days", "supplier_price_inr": 350, "price_inr": 365 },
+      { "duration_id": 71, "duration": "30 Days", "supplier_price_inr": 750, "price_inr": 765 }
+    ],
     "active": true
   },
   {
@@ -87,7 +152,11 @@
     "name": "iOS Phone All Gbox Certificate",
     "description": "iOS Phone All Gbox Certificate",
     "category": "iOS",
-    "price_inr": 0,
+    "supplier_product_id": 84,
+    "plans": [
+      { "duration_id": 64, "duration": "1 Year iOS Esign Gbox Certificate", "supplier_price_inr": 200, "price_inr": 215 },
+      { "duration_id": 65, "duration": "1 Year iOS Signer Gbox Certificate", "supplier_price_inr": 499, "price_inr": 514 }
+    ],
     "active": true
   },
   {
@@ -96,7 +165,15 @@
     "description": "Myth Android And iOS",
     "category": "Android Non Root",
     "categories": ["Android Non Root", "iOS"],
-    "price_inr": 0,
+    "supplier_product_id": 79,
+    "plans": [
+      { "duration_id": 48, "duration": "1 Hour", "supplier_price_inr": 5, "price_inr": 20 },
+      { "duration_id": 49, "duration": "3 Hours", "supplier_price_inr": 9, "price_inr": 24 },
+      { "duration_id": 50, "duration": "6 Hours", "supplier_price_inr": 18, "price_inr": 33 },
+      { "duration_id": 51, "duration": "12 Hours", "supplier_price_inr": 36, "price_inr": 51 },
+      { "duration_id": 52, "duration": "1 Day", "supplier_price_inr": 45, "price_inr": 60 },
+      { "duration_id": 53, "duration": "7 Days", "supplier_price_inr": 110, "price_inr": 125 }
+    ],
     "active": true
   },
   {
@@ -105,7 +182,16 @@
     "description": "Phantom FF All",
     "category": "Android Non Root",
     "categories": ["Android Non Root", "Android Root", "iOS"],
-    "price_inr": 0,
+    "supplier_product_id": 87,
+    "plans": [
+      { "duration_id": 72, "duration": "1 Hour", "supplier_price_inr": 7.5, "price_inr": 22.5 },
+      { "duration_id": 73, "duration": "3 Hours", "supplier_price_inr": 15, "price_inr": 30 },
+      { "duration_id": 74, "duration": "6 Hours", "supplier_price_inr": 21.43, "price_inr": 36.43 },
+      { "duration_id": 75, "duration": "12 Hours", "supplier_price_inr": 42.86, "price_inr": 57.86 },
+      { "duration_id": 76, "duration": "1 Day", "supplier_price_inr": 48.21, "price_inr": 63.21 },
+      { "duration_id": 77, "duration": "3 Days", "supplier_price_inr": 90, "price_inr": 105 },
+      { "duration_id": 78, "duration": "7 Days", "supplier_price_inr": 176.79, "price_inr": 191.79 }
+    ],
     "active": true
   },
   {
@@ -113,7 +199,14 @@
     "name": "Silent Cheats Apkmod",
     "description": "Silent Cheats Apkmod",
     "category": "Android Non Root",
-    "price_inr": 0,
+    "supplier_product_id": 88,
+    "plans": [
+      { "duration_id": 79, "duration": "1 Day", "supplier_price_inr": 26, "price_inr": 41 },
+      { "duration_id": 80, "duration": "3 Days", "supplier_price_inr": 65, "price_inr": 80 },
+      { "duration_id": 81, "duration": "7 Days", "supplier_price_inr": 130, "price_inr": 145 },
+      { "duration_id": 82, "duration": "14 Days", "supplier_price_inr": 260, "price_inr": 275 },
+      { "duration_id": 83, "duration": "28 Days", "supplier_price_inr": 520, "price_inr": 535 }
+    ],
     "active": true
   }
 ]
