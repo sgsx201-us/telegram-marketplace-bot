@@ -424,74 +424,18 @@ function getSupplierDuration(supplierProduct, durationId) {
 
 
 async function getLiveProducts() {
-  let catalog;
-
-  try {
-    catalog = await getArpanCatalog(true);
-  } catch (error) {
-    console.error('ARPAN catalogue unavailable:', error.message);
-
-    return products.map(item => ({
-      ...item,
-      plans: (item.plans || []).map(plan => ({
-        ...plan,
-        stock: null,
-        available: true
-      }))
-    }));
-  }
-
-  return products.map(item => {
-    const supplierProduct = getSupplierProduct(
-      catalog,
-      item.supplier_product_id
-    );
-
-    return {
-      ...item,
-      plans: (item.plans || []).map(plan => {
-        const supplierDuration = getSupplierDuration(
-          supplierProduct,
-          plan.duration_id
-        );
-
-        return {
-          ...plan,
-          stock: supplierDuration
-            ? Number(supplierDuration.stock || 0)
-            : null,
-          available: Boolean(supplierDuration)
-        };
-      })
-    };
-  });
+  // Product visibility is based on the local products.json configuration.
+  // Do not request or inspect supplier stock when displaying products.
+  return products.map(item => ({
+    ...item,
+    plans: (item.plans || []).map(plan => ({
+      ...plan,
+      stock: null,
+      available: true
+    }))
+  }));
 }
 
-
-async function getPlanAvailability(item, plan) {
-  const catalog = await getArpanCatalog();
-  const supplierProduct = getSupplierProduct(
-    catalog,
-    item.supplier_product_id
-  );
-
-  const supplierDuration = getSupplierDuration(
-    supplierProduct,
-    plan.duration_id
-  );
-
-  const stock = Math.max(
-    0,
-    Number(supplierDuration?.stock || 0)
-  );
-
-  return {
-    available: Boolean(supplierDuration && stock > 0),
-    stock,
-    supplierProduct,
-    supplierDuration
-  };
-}
 
 async function buyFromArpan(orderItem) {
   const quantity = Number(orderItem.quantity || 1);
@@ -703,8 +647,7 @@ async function creditWalletDeposit(agOrderId, paymentId) {
         'SELECT balance_paise FROM wallets WHERE telegram_id=$1',
         [telegramId]
       );
-
-      await client.query('COMMIT');
+            await client.query('COMMIT');
 
       return {
         alreadyCredited: true,
@@ -1354,7 +1297,7 @@ async function fulfilLegacyStockOrder(order) {
 
 async function processArpanOrder(orderId, paymentId = '', utr = '') {
   const client = await pool.connect();
-  let order;
+    let order;
 
   try {
     await client.query('BEGIN');
@@ -1684,26 +1627,11 @@ async function showPaymentMethods(chatId, productId) {
     throw new Error('No duration plans found for this product.');
   }
 
-  const catalog = await getArpanCatalog().catch(() => null);
-
   const buttons = [];
 
   for (const plan of item.plans) {
-    const supplierProduct = catalog
-      ? getSupplierProduct(catalog, item.supplier_product_id)
-      : null;
-
-    const supplierDuration = getSupplierDuration(
-      supplierProduct,
-      plan.duration_id
-    );
-
-    const stock = Math.max(0, Number(supplierDuration?.stock || 0));
-
     buttons.push([{
-      text: stock > 0
-        ? `⏳ ${plan.duration} — ₹${Number(plan.price_inr).toFixed(2)}`
-        : `❌ ${plan.duration} — OUT OF STOCK`,
+      text: `⏳ ${plan.duration} — ₹${Number(plan.price_inr).toFixed(2)}`,
       callback_data: `plan:${item.id}:${plan.duration_id}`
     }]);
   }
@@ -1718,7 +1646,7 @@ async function showPaymentMethods(chatId, productId) {
     text:
       `📦 ${item.name}\n\n` +
       `👇 SELECT YOUR DURATION:\n` +
-      `The current supplier stock is checked before checkout.`,
+      `Availability is confirmed by the supplier when your order is processed.`,
     reply_markup: { inline_keyboard: buttons }
   });
 }
@@ -1729,27 +1657,6 @@ async function showPlanPaymentMethods(chatId, productId, durationId) {
 
   if (!item || !plan) throw new Error('Selected plan is unavailable.');
 
-  const availability = await getPlanAvailability(item, plan);
-
-  if (!availability.available) {
-    await tg('sendMessage', {
-      chat_id: chatId,
-      text:
-        `📦 ${item.name}\n` +
-        `⏳ ${plan.duration}\n\n` +
-        `❌ This plan is currently out of stock.\n` +
-        `Please check again later.`,
-      reply_markup: {
-        inline_keyboard: [[{
-          text: '⬅️ Back to Plans',
-          callback_data: `buy:${item.id}`
-        }]]
-      }
-    });
-
-    return;
-  }
-
   const price = Number(plan.price_inr);
 
   await tg('sendMessage', {
@@ -1758,7 +1665,7 @@ async function showPlanPaymentMethods(chatId, productId, durationId) {
       `📦 ${item.name}\n` +
       `⏳ Duration: ${plan.duration}\n` +
       `💰 Price: ₹${price.toFixed(2)}\n` +
-      `📦 Available stock: ${availability.stock}\n\n` +
+      `\n` +
       `Choose your payment method:`,
     reply_markup: {
       inline_keyboard: [
@@ -1792,10 +1699,6 @@ async function createChatOrder(chatId, telegramId, productId, durationId) {
   const plan = findPlan(item, durationId);
 
   if (!item || !plan) throw new Error('Selected plan is unavailable.');
-
-  const availability = await getPlanAvailability(item, plan);
-
-  if (!availability.available) throw new Error('This plan is out of stock.');
 
   const orderItem = getPlanSnapshot(item, plan, 1);
 
@@ -1888,10 +1791,6 @@ async function purchaseWithWallet(chatId, telegramId, productId, durationId) {
   const plan = findPlan(item, durationId);
 
   if (!item || !plan) throw new Error('Selected plan is unavailable.');
-
-  const availability = await getPlanAvailability(item, plan);
-
-  if (!availability.available) throw new Error('This plan is out of stock.');
 
   const amountPaise = getPlanPricePaise(plan);
 
@@ -2088,6 +1987,7 @@ async function checkChatPayment(agOrderId, telegramId) {
 
   return '⏳ Payment is still pending. Please try again shortly.';
 }
+
 // --------------------------------------------------
 // EXPRESS AND MINI APP
 // --------------------------------------------------
@@ -2209,14 +2109,6 @@ app.post('/api/create-order', async (req, res) => {
       if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) {
         return res.status(400).json({
           error: 'Invalid product quantity.'
-        });
-      }
-
-      const availability = await getPlanAvailability(item, plan);
-
-      if (!availability.available || availability.stock < quantity) {
-        return res.status(409).json({
-          error: `${item.name} - ${plan.duration} does not have enough stock.`
         });
       }
 
