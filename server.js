@@ -1542,9 +1542,35 @@ async function processArpanOrder(orderId, paymentId = '', utr = '') {
       return { status: 'supplier_failed' };
     }
 
+    
     if (definiteFailure && successfulQuantity === 0 && method === 'upi_wallet') {
+      await tg('sendMessage', {
+        chat_id: order.telegram_id,
+        text:
+          `⚠️ Your payment was received, but the supplier could not complete your order.\n\n` +
+          `Wallet contribution: ₹${formatRupees(order.wallet_used_paise)}\n` +
+          `The UPI portion requires an administrator to check and handle the refund.\n` +
+          `Please do not make another payment.\n` +
+          `Order: ${orderId}`
+      }).catch(() => {});
+
       await admin(
-        `HYBRID ORDER SUPPLIER FAILURE\nOrder: ${orderId}\nCustomer: ${order.telegram_id}\nWallet contribution: ₹${formatRupees(order.wallet_used_paise)}\nUPI amount: ₹${formatRupees(order.amount_paise)}\nNo wallet contribution was available to refund. Check whether the UPI payment needs manual refund handling.\nReason: ${error.message}`
+        `HYBRID ORDER SUPPLIER FAILURE — UPI REFUND ACTION REQUIRED\nOrder: ${orderId}\nCustomer: ${order.telegram_id}\nWallet contribution: ₹${formatRupees(order.wallet_used_paise)}\nUPI amount: ₹${formatRupees(order.amount_paise)}\nVerify the payment and arrange a manual UPI refund if payment was received.\nReason: ${error.message}`
+      );
+    }
+
+    if (definiteFailure && successfulQuantity === 0 && method === 'upi') {
+      await tg('sendMessage', {
+        chat_id: order.telegram_id,
+        text:
+          `⚠️ Your payment was received, but the supplier could not complete your order.\n\n` +
+          `The administrator has been notified to check your payment and refund.\n` +
+          `Please do not make another payment.\n` +
+          `Order: ${orderId}`
+      }).catch(() => {});
+
+      await admin(
+        `UPI ORDER SUPPLIER FAILURE — REFUND ACTION REQUIRED\nOrder: ${orderId}\nCustomer: ${order.telegram_id}\nUPI amount: ₹${formatRupees(order.amount_paise)}\nVerify the payment and arrange a manual UPI refund if payment was received.\nReason: ${error.message}`
       );
     }
 
@@ -1570,6 +1596,7 @@ async function fulfil(agOrderId, paymentId, utr = '') {
     utr
   );
 }
+
 
 // --------------------------------------------------
 // PRODUCT STORE AND TELEGRAM MENUS
