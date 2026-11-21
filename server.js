@@ -1959,61 +1959,67 @@ async function checkChatPayment(agOrderId, telegramId) {
     return '⚠️ Your payment was received. Your order is being reviewed by the administrator.';
   }
 
-  if (order.fulfillment_status === 'processing') {
-    return '⏳ Your order is being processed. Please wait.';
-  }
+  
+if (order.fulfillment_status === 'processing') {
+  return '⏳ Your order is being processed. Please wait.';
+}
 
-  if (order.status === 'paid_out_of_stock') {
-    return '⚠️ Payment received, but stock is unavailable. Contact support.';
-  }
+if (order.fulfillment_status === 'supplier_failed') {
+  return '⚠️ Payment was received, but the supplier could not fulfil your order. The administrator has been notified to check your refund. Please do not pay again. Contact support.';
+}
 
-  const verification = await verifyAGPayment(agOrderId);
-  const data = verification.data || {};
-  const status = String(data.status || '').toUpperCase();
+if (order.status === 'paid_out_of_stock') {
+  return '⚠️ Payment received, but stock is unavailable. Contact support.';
+}
 
-  if (status === 'PAID') {
-    const receivedPaise = rupeesToPaise(data.amount);
+const verification = await verifyAGPayment(agOrderId);
+const data = verification.data || {};
+const status = String(data.status || '').toUpperCase();
 
-    if (receivedPaise !== Number(order.amount_paise)) {
-      await admin(
-        `PAYMENT AMOUNT MISMATCH\nOrder: ${order.id}\nAG order: ${agOrderId}`
-      );
+if (status === 'PAID') {
+  const receivedPaise = rupeesToPaise(data.amount);
 
-      return '⚠️ Payment amount does not match. Contact admin.';
-    }
-
-    const fulfilment = await fulfil(
-      agOrderId,
-      data.transaction_id || agOrderId,
-      data.utr || ''
+  if (receivedPaise !== Number(order.amount_paise)) {
+    await admin(
+      `PAYMENT AMOUNT MISMATCH\nOrder: ${order.id}\nAG order: ${agOrderId}`
     );
 
-    if (fulfilment.status === 'paid') {
-      return '✅ Payment verified and product delivered. Check this chat.';
-    }
-
-    if (fulfilment.status === 'manual_review') {
-      return '⚠️ Payment received. Your order needs admin review.';
-    }
-
-    if (fulfilment.status === 'processing') {
-      return '⏳ Your order is still processing.';
-    }
-
-    if (fulfilment.status === 'supplier_failed') {
-      return '⚠️ Supplier could not fulfil the order. Contact support.';
-    }
-
-    return '⏳ Your order is being checked.';
+    return '⚠️ Payment amount does not match. Contact admin.';
   }
 
-  if (status === 'EXPIRED') {
-    await refundExpiredHybridOrder(agOrderId);
-    return '⌛ Payment expired. Any wallet contribution has been returned.';
+  const fulfilment = await fulfil(
+    agOrderId,
+    data.transaction_id || agOrderId,
+    data.utr || ''
+  );
+
+  if (fulfilment.status === 'paid') {
+    return '✅ Payment verified and product delivered. Check this chat.';
   }
 
-  return '⏳ Payment is still pending. Please try again shortly.';
+  if (fulfilment.status === 'manual_review') {
+    return '⚠️ Payment received. Your order needs admin review.';
+  }
+
+  if (fulfilment.status === 'processing') {
+    return '⏳ Your order is still processing.';
+  }
+
+  if (fulfilment.status === 'supplier_failed') {
+    return '⚠️ Supplier could not fulfil the order. Contact support.';
+  }
+
+  return '⏳ Your order is being checked.';
 }
+
+if (status === 'EXPIRED') {
+  await refundExpiredHybridOrder(agOrderId);
+  return '⌛ Payment expired. Any wallet contribution has been returned.';
+}
+
+return '⏳ Payment is still pending. Please try again shortly.';
+}
+
 
 // --------------------------------------------------
 // EXPRESS AND MINI APP
